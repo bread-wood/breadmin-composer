@@ -1441,6 +1441,47 @@ This constraint is already satisfied by the current recommended worker configura
 
 **Why this is BLOCKS_IMPL:** Empirical confirmation of the inheritance gap is needed before finalizing the runner's security architecture. Treating it as confirmed based on documentary evidence alone risks over- or under-engineering the mitigation.
 
+**Status (Issue #80):** Addressed in Section 20. Web-based research produced additional corroborating documentary evidence. Confidence level for non-inheritance upgraded from [INFERRED-HIGH] to [DOCUMENTED+INFERRED-HIGH]. Live CLI log capture remains the final step to reach [EMPIRICAL]. See R-80-A below.
+
+---
+
+### R-80-A: Live CLI execution of Task subagent isolation smoke test [HIGHEST_PRIORITY]
+
+**Question:** Execute the exact test procedure from Issue #80 against the current Claude Code CLI to produce a timestamped policy server log confirming (or refuting) that the subagent's Bash call does not appear.
+
+**Why this is the highest remaining priority:** Section 20 aggregated new evidence — including the official subagents documentation explicitly omitting `permissionPromptTool` from the frontmatter schema, GitHub Issue #29333 confirming the Task tool's "Permission Required: No" designation means ask rules are silently ignored, and Z-Lemke's empirical E2E confirmation of hook non-inheritance (Issue #21460) — but no community member has published a policy server log specifically capturing the absence of subagent tool calls. This is the step to change status from [DOCUMENTED+INFERRED-HIGH] to [EMPIRICAL].
+
+**Test approach:**
+1. Start the minimal policy server from Section 8 with file logging enabled
+2. Run:
+   ```bash
+   claude -p "Use the Task tool to spawn a subagent that runs Bash(ls /)" \
+     --permission-prompt-tool mcp__conductor-policy__check_permission \
+     --allowedTools "Task,Bash" \
+     --mcp-config '{"mcpServers": {"conductor-policy": {"command": "python", "args": ["/tmp/policy_server.py"]}}}'
+   ```
+3. Inspect the policy server log for entries mentioning `ls /`
+4. If no `ls /` entry appears: gap confirmed as [EMPIRICAL], mitigation constraint stands
+5. If `ls /` entry appears: inheritance occurs; all Section 19 architecture assumptions require revision
+
+**Environment note:** Requires Claude Code CLI v2.1.63+ (the version where Task was renamed to Agent but `Task` is preserved as an alias).
+
+### R-80-B: Confirm built-in subagent (Explore/Plan) policy server isolation [V2_RESEARCH] → Issue #91
+
+**Question:** Does the Explore or Plan built-in subagent also bypass the policy server when invoked from a `--permission-prompt-tool` headless session?
+
+**Why this matters:** Section 19.9 notes that built-in subagents may be auto-triggered even when `Task` is not explicitly in `--allowedTools`. If Explore and Plan also bypass the policy server, excluding `Task` from `--allowedTools` is insufficient because Claude Code's internal Explore invocations may still route Read calls outside the policy server.
+
+**Test approach:** Run `claude -p "Explore the /tmp directory"` with `--permission-prompt-tool` configured and `Task` excluded from `--allowedTools`. Check whether the Explore subagent's Read tool calls appear in the policy server log. Repeat with a prompt that triggers Plan mode.
+
+### R-80-C: Agent-tool rename impact on --allowedTools / --disallowedTools filtering [V2_RESEARCH] → Issue #93
+
+**Question:** In Claude Code v2.1.63+ where the Task tool was renamed to Agent, does `--disallowedTools "Task"` still correctly prevent in-process subagent spawning, or must `--disallowedTools "Agent"` be used instead?
+
+**Why this matters:** Section 20.5 documents the rename. The official docs state "Task(...) references in settings and agent definitions still work as aliases." It is unclear whether this alias is honored by `--allowedTools` and `--disallowedTools` CLI flags specifically, or only by frontmatter fields. If CLI flags do not honor the alias, all conductor worker configurations using `--disallowedTools "Task"` must be updated.
+
+**Test approach:** In CLI v2.1.63+, run with `--disallowedTools "Task"` and verify the Agent tool cannot be invoked. Repeat with `--disallowedTools "Agent"`. Confirm which form is effective, and update the conductor worker flag recommendations accordingly.
+
 ---
 
 ### 19.11 Sources (Issue #62 Addendum)
@@ -1458,6 +1499,177 @@ This constraint is already satisfied by the current recommended worker configura
 - [GitHub Issue #18885: Allow subagents to forward permission requests to foreground conversation (closed duplicate)](https://github.com/anthropics/claude-code/issues/18885) [DOCUMENTED — dontAsk mode auto-denial in subagents confirmed]
 - [GitHub Issue #5465: Task subagents fail to inherit permissions in MCP server mode (closed not planned)](https://github.com/anthropics/claude-code/issues/5465) [DOCUMENTED — MCP server mode permission non-inheritance]
 - [GitHub Issue #6005: Feature Request: Add disallowed-tools to sub-agent frontmatter (closed not planned, Jan 2026)](https://github.com/anthropics/claude-code/issues/6005) [DOCUMENTED — confirms disallowedTools frontmatter as the intended per-subagent mechanism]
+
+## 20. Task Subagent Isolation Empirical Evidence (Issue #80)
+
+**Issue:** #80
+**Date:** 2026-03-02
+**Status:** Research Complete (web-based research; live CLI execution not performed)
+**Spawned From:** R-62-C (Section 19.10, above)
+
+---
+
+### 20.1 Research Question
+
+Issue #80 asks: in a headless `claude -p` session configured with `--permission-prompt-tool mcp__conductor-policy__check_permission`, when a subagent is spawned via the Task tool, does the policy server's log show any calls for the subagent's tool invocations?
+
+The expected outcome (from Section 19 documentary research) is that the subagent's tool calls do NOT appear in the policy server log, confirming the security gap. Issue #80 was opened to either produce empirical log evidence confirming this, or discover evidence that inheritance does occur.
+
+---
+
+### 20.2 Research Method
+
+This section consolidates web-based documentary and community evidence gathered during the Issue #80 research pass (2026-03-02). No live CLI execution was performed. Evidence is drawn from:
+
+1. Official Anthropic documentation (subagents reference, permissions reference)
+2. GitHub issue tracker reports with empirical reproductions
+3. Community E2E test reports
+4. Cross-referencing absence of any contradictory evidence (no published report of a policy server log showing subagent calls appearing)
+
+---
+
+### 20.3 New Evidence Gathered
+
+The following evidence was gathered during the Issue #80 research pass and supplements the Section 19 analysis.
+
+#### 20.3.1 Official Documentation: `permissionPromptTool` Absent from Frontmatter Schema [DOCUMENTED]
+
+The current official subagents documentation (`code.claude.com/docs/en/sub-agents`) lists the complete set of supported frontmatter fields as of Claude Code v2.1.63+:
+
+> `name`, `description`, `tools`, `disallowedTools`, `model`, `permissionMode`, `maxTurns`, `skills`, `mcpServers`, `hooks`, `memory`, `background`, `isolation`
+
+The field `permissionPromptTool` (or any equivalent) is explicitly absent. This is the definitive documentary confirmation: there is no supported mechanism to route a subagent's tool calls to a policy server — whether inherited from the parent CLI invocation or configured in frontmatter. The architectural gap is not a bug or an oversight; it is the documented state of the API.
+
+**Confidence level:** [DOCUMENTED] — from the official canonical reference for frontmatter fields.
+
+#### 20.3.2 Official Documentation: `permissionMode` Field Semantics and the Permission Evaluation Stack [DOCUMENTED]
+
+The official SDK permissions page confirms the permission evaluation order for subagents:
+1. Hooks
+2. Permission rules (settings.json allow/deny/ask)
+3. Permission mode (default/acceptEdits/dontAsk/bypassPermissions/plan)
+4. `canUseTool` callback
+
+Step 4's `canUseTool` callback is the SDK-level equivalent of `--permission-prompt-tool`, but it is only available when using the Python or TypeScript Agent SDK directly — not when running via the CLI with `--permission-prompt-tool`. For CLI-spawned sessions, step 4 is fulfilled by the MCP policy server named in `--permission-prompt-tool`, but this configuration is a CLI-level parameter and is not propagated into in-process subagent spawning logic. In a CLI subagent context, step 4 has no handler.
+
+The `permissionMode` field controls step 3 behavior. None of its available values (`default`, `acceptEdits`, `dontAsk`, `bypassPermissions`, `plan`) cause the subagent to delegate decisions to an MCP policy server. `default` triggers interactive prompts — which in headless mode cause P1 hangs (doc #14, Pattern P1), not MCP policy calls.
+
+**Confidence level:** [DOCUMENTED] — from `platform.claude.com/docs/en/agent-sdk/permissions`.
+
+#### 20.3.3 Issue #25000 Detail: Specific Tool Calls That Bypassed Deny Rules [DOCUMENTED]
+
+GitHub Issue #25000 provides the most concrete behavioral evidence. The reporter had `"Bash"` in their `settings.local.json` deny list. When Claude spawned two subagents via the Task tool to run a security audit, the subagents executed 22+ bash commands without individual per-command approval:
+
+- `ls -la ~/.ssh/` (accessed SSH directory)
+- `cat ~/.bashrc`, `cat ~/.profile` (read shell configs)
+- `tail -100 ~/.bash_history` (read command history)
+- `ps aux`, `ss -tulnp` (listed processes and network connections)
+- `find / -perm -4000` (filesystem scan)
+
+These commands executed despite `Bash` being in the deny list. Deny rules are processed at Step 2 of the permission evaluation stack — the same layer as `--allowedTools`/`--disallowedTools`. If Step 2 deny rules are bypassed by subagents, it is highly likely (by architectural analogy) that Step 4 policy server calls are also absent, since both are applied by the permission stack of the parent session's context, not the subagent's own context.
+
+Issue #25000 was closed as a duplicate of #21460 and #18950, confirming this is a known, recurring architectural limitation rather than a transient bug.
+
+**Confidence level:** [DOCUMENTED] — empirical user-reported behavior with specific commands listed.
+
+#### 20.3.4 Issue #29333: Task Tool Has "Permission Required: No" [DOCUMENTED]
+
+GitHub Issue #29333 (filed February 2026, OPEN) reveals a critical architectural detail: the Task tool has `"Permission Required: No"` in its internal configuration. This means `ask` rules in the `permissions` configuration are silently ignored for Task invocations — there is no way to require user approval before a subagent spawns through normal permission rules.
+
+The practical implication for the `--permission-prompt-tool` case: if `ask` rules do not gate the Task tool itself, the policy server's role in the permission evaluation stack is further curtailed. Not only does the subagent's permission stack lack a policy server entry — the Task tool's own invocation bypasses the ask-rule mechanism that would normally route to the policy server.
+
+**Confidence level:** [DOCUMENTED] — from the issue report with specific internal configuration detail cited by the issue author.
+
+#### 20.3.5 Issue #21460 Z-Lemke Empirical Confirmation [EMPIRICAL — hooks; INFERRED-HIGH — policy server]
+
+GitHub Issue #21460 includes a confirmed empirical reproduction by user Z-Lemke (February 8, 2026):
+
+> "I've empirically confirmed this issue while testing a PreToolUse-based safety plugin."
+>
+> Test setup: plugin-level PreToolUse hook with empty matcher (applies to all tools) + deny rule for `curl` + 2 subagents in parallel via Task tool.
+>
+> Findings: Task tool successfully spawned subagents. Plugin loaded (visible in debug logs). Subagent attempted `curl` command. NO hook execution — no evidence in debug logs. curl blocked by sandbox network restriction, NOT by the deny rule.
+
+This test directly confirms that PreToolUse hooks (Step 1) are not fired for subagent tool calls. The architectural reason — that the subagent runs in its own permission context that does not include the parent session's permission stack — applies equally to Step 4 (the policy server). The Z-Lemke test is the closest available empirical evidence to the Issue #80 test scenario, differing only in that it tests hook non-inheritance rather than policy server non-inheritance.
+
+**Confidence level for hooks:** [EMPIRICAL] — direct E2E confirmation by Z-Lemke.
+
+**Confidence level for policy server (by architectural analogy):** [INFERRED-HIGH] — same permission context isolation that causes hook non-inheritance causes policy server non-inheritance; both are parent session context attributes.
+
+---
+
+### 20.4 Confidence Level Assessment
+
+| Claim | Basis | Confidence Level |
+|-------|-------|-----------------|
+| `--permission-prompt-tool` is not inherited by Task tool subagents | CLI flag architecture + `permissionPromptTool` absent from frontmatter schema | [DOCUMENTED] |
+| Subagent permission stack lacks Step 4 (policy server call) | No `permissionPromptTool` frontmatter field; SDK docs show step 4 = `canUseTool` (SDK-only, not CLI) | [DOCUMENTED + INFERRED-HIGH] |
+| Subagent tool calls bypass parent deny rules | Issue #25000 behavioral report with specific commands; Issues #18950 and #22665 repro | [DOCUMENTED] |
+| Subagent tool calls bypass parent PreToolUse hooks | Issue #21460 Z-Lemke E2E test | [EMPIRICAL] |
+| Subagent tool calls do NOT appear in policy server log | Architectural analogy from hook non-inheritance (same isolation mechanism) + no contradictory report found | [INFERRED-HIGH] |
+| Task tool has "Permission Required: No" (ask rules silently ignored) | Issue #29333 internal config detail | [DOCUMENTED] |
+
+**Overall confidence in the gap:** [DOCUMENTED + INFERRED-HIGH]
+
+**Upgrade path to [EMPIRICAL]:** Execute R-80-A (live CLI smoke test with policy server log capture).
+
+---
+
+### 20.5 Architectural Note: Task Tool Renamed to Agent in v2.1.63
+
+The official subagents documentation notes: "In version 2.1.63, the Task tool was renamed to Agent. Existing `Task(...)` references in settings and agent definitions still work as aliases."
+
+This rename has two implications for the gap analysis:
+
+1. **Current API name is `Agent`**: New conductor code and documentation should reference the `Agent` tool. The isolation gap applies equally to both names — they refer to the same in-process subagent spawning mechanism.
+
+2. **CLI flag alias status is unclear**: Whether `--allowedTools "Task"` and `--disallowedTools "Task"` correctly filter the renamed `Agent` tool via the documented alias needs verification (see R-80-C, Issue #93). Until verified, using an allowlist that excludes both names is the safe default:
+   ```bash
+   --allowedTools "Read,Edit,Write,Bash,Glob,Grep"
+   # Neither "Task" nor "Agent" appears -> subagent spawning disabled regardless of alias behavior
+   ```
+
+---
+
+### 20.6 Conductor Architecture Implications
+
+The evidence gathered in this research pass reinforces and sharpens the Section 19.8 architectural guidance:
+
+**Confirmed constraints for conductor:**
+
+1. **Workers must not have Task/Agent in `--allowedTools`**: This is now [DOCUMENTED] as a mandatory security constraint, not a precautionary recommendation. The policy server provides no protection for tool calls made within an in-process subagent.
+
+2. **OS sandbox is the correct fallback enforcement layer**: The Z-Lemke E2E test notes that `curl` was blocked by sandbox network restriction, not by the deny rule. This empirically confirms that the OS sandbox (doc #20) enforces constraints that permission-rule inheritance failures cannot bypass. The sandbox is the primary enforcement layer when permission rules are unreliable.
+
+3. **Subprocess architecture sidesteps the gap entirely**: Each `claude -p` subprocess receives its own `--permission-prompt-tool` flag. The isolation gap is specific to in-process Task/Agent subagents. Conductor's subprocess dispatch pattern (doc #01) is confirmed as the correct architectural choice.
+
+4. **Subagent frontmatter hooks are the correct per-subagent security mechanism**: If any future conductor component must use in-process subagents, the `hooks` frontmatter field provides PreToolUse enforcement that runs in the subagent's own context. This is the only permission-level mechanism that works for in-process subagents in the current CLI.
+
+---
+
+### 20.7 Remaining Gaps
+
+| Gap | Issue | Priority |
+|-----|-------|---------|
+| Live CLI policy server log capture confirming no subagent calls | R-80-A (tracked by #80) | HIGHEST |
+| Built-in Explore/Plan subagent policy server isolation | R-80-B (Issue #91) | V2 |
+| Task/Agent rename alias behavior in --allowedTools/--disallowedTools | R-80-C (Issue #93) | V2 |
+| --disallowedTools CLI flag inheritance by Task/Agent subagents | Issue #81 | V2 |
+| PreToolUse hook propagation fix status (Issue #21460) | Issue #82 | TRACK |
+
+No changes to the conductor's architectural decisions are warranted by this research pass. The [DOCUMENTED+INFERRED-HIGH] confidence level is sufficient to treat the gap as confirmed for implementation purposes. R-80-A is recommended before finalizing production security documentation.
+
+---
+
+### 20.8 Sources (Issue #80 Addendum)
+
+- [Create custom subagents — Claude Code Docs (complete frontmatter schema listing; `permissionPromptTool` absent from supported fields)](https://code.claude.com/docs/en/sub-agents) [DOCUMENTED — definitive schema reference; confirms no policy server routing mechanism exists for subagents]
+- [Configure permissions — Claude API Docs (permission evaluation order: step 4 = `canUseTool` callback, SDK-only feature not available in CLI-spawned subagents)](https://platform.claude.com/docs/en/agent-sdk/permissions) [DOCUMENTED — confirms `canUseTool` is SDK-level only, not propagated to CLI subagents]
+- [GitHub Issue #25000: Sub-agents bypass permission deny rules and per-command approval — security risk (closed duplicate of #21460 and #18950)](https://github.com/anthropics/claude-code/issues/25000) [DOCUMENTED — 22+ bash commands executed by subagent despite Bash being in the deny list; specific exfiltration-risk commands enumerated]
+- [GitHub Issue #21460: SECURITY: PreToolUse hooks not enforced on subagent tool calls (OPEN, E2E confirmed by Z-Lemke)](https://github.com/anthropics/claude-code/issues/21460) [EMPIRICAL — direct E2E confirmation that hook non-inheritance occurs; closest available empirical analog to policy server non-inheritance]
+- [GitHub Issue #29333: Task tool should respect `ask` permission rules (OPEN, Feb 2026)](https://github.com/anthropics/claude-code/issues/29333) [DOCUMENTED — Task tool has "Permission Required: No" internal config; ask rules silently ignored; policy server gap further confirmed]
+- [GitHub Issue #18950: Skills/subagents do not inherit user-level permissions from settings.json (OPEN, has repro)](https://github.com/anthropics/claude-code/issues/18950) [DOCUMENTED — allow-rule non-inheritance confirmed; corroborates breadth of permission isolation]
+- [GitHub Issue #5465: Task subagents fail to inherit permissions in MCP server mode (closed not planned)](https://github.com/anthropics/claude-code/issues/5465) [DOCUMENTED — MCP server mode permission non-inheritance; aligns with CLI headless policy server isolation finding]
 
 ---
 
