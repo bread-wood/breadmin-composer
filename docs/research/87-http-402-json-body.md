@@ -511,9 +511,6 @@ internal TypeScript implementation may have the correct JSON path reading regard
 
 ---
 
-<<<<<<< Updated upstream
-## 6. Sources
-=======
 ## 6. Section 3: Empirical Evidence for billing_error in Stream-JSON (Issue #95)
 
 This section records the findings of issue #95 research, which sought to empirically verify
@@ -1197,7 +1194,6 @@ of this document.
 ---
 
 ## 8. Sources
->>>>>>> Stashed changes
 
 - [Anthropic API Errors Documentation](https://platform.claude.com/docs/en/api/errors) — Official
   list of documented HTTP status codes and `error.type` values. HTTP 402 is NOT listed. States that
