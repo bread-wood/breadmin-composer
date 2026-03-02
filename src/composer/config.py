@@ -1,4 +1,4 @@
-"""Configuration model for breadmin-conductor.
+"""Configuration model for breadmin-composer.
 
 Resolves settings from environment variables and CLI flags.
 CLI flags take precedence over env vars; env vars take precedence over defaults.
@@ -13,7 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Config(BaseSettings):
-    """Runtime configuration for conductor commands."""
+    """Runtime configuration for composer commands."""
 
     model_config = SettingsConfigDict(env_prefix="CONDUCTOR_", env_file=".env")
 
@@ -24,7 +24,7 @@ class Config(BaseSettings):
 
     # Paths
     data_dir: Path = Field(
-        default=Path("~/.local/share/conductor").expanduser(),
+        default=Path("~/.local/share/composer").expanduser(),
         description="Root data directory for sessions and cost ledger",
     )
 
