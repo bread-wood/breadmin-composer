@@ -8,15 +8,24 @@
 
 ## 1. System Overview
 
-breadmin-composer is a Python CLI orchestrator that automates multi-stage GitHub issue workstreams using Claude Code in headless `-p` mode. It runs as a single orchestrator process that coordinates isolated Claude Code subprocesses (agents) across four pipeline stages:
+breadmin-composer is a Python CLI orchestrator that automates multi-stage GitHub issue workstreams using Claude Code in headless `-p` mode. It runs as a single orchestrator process that coordinates isolated Claude Code subprocesses (agents) across six pipeline stages:
 
 ```
-plan-milestones → research-worker → design-worker → impl-worker
+spec → plan-milestones → research-worker → design-worker → plan-issues → impl-worker
 ```
 
-Each stage is driven by a worker entry point (`research-worker`, `design-worker`, `impl-worker`) that invokes `claude -p` as subprocesses, monitors results via stream-json output, and persists state to an external checkpoint file. No stage is skipped; each stage's output is the next stage's input.
+| Stage | Entry point | Produces |
+|-------|-------------|---------|
+| spec | *(human)* | `docs/specs/<version>.md` — scope, success criteria, constraints |
+| plan-milestones | *(human + orchestrator)* | GitHub milestone pair, seed research issues |
+| research-worker | `research-worker` | `docs/research/<N>-<slug>.md` per issue |
+| design-worker | `design-worker` | `docs/design/HLD.md` + `docs/design/lld/<module>.md` |
+| plan-issues | `plan-issues` | GitHub impl issues with acceptance criteria and dep graph |
+| impl-worker | `impl-worker` | Merged PRs, working code |
 
-**What it is not:** breadmin-composer is not a general-purpose AI agent framework. It is purpose-built for the specific workstream of: research → design → implement GitHub issues against a Python codebase.
+No stage is skipped; each stage's output is the next stage's input. Design and issue decomposition are explicitly separated: `design-worker` produces design documents only; `plan-issues` reads those docs and creates actionable GitHub issues.
+
+**What it is not:** breadmin-composer is not a general-purpose AI agent framework. It is purpose-built for the workstream: spec → research → design → issue decomposition → implement.
 
 ---
 
