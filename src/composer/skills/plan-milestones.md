@@ -21,6 +21,28 @@ Read the project CLAUDE.md to understand the domain and constraints.
 
 ## Execution
 
+### Step 0 — Read the Spec
+
+Before doing anything else, locate and read the spec file for the target version:
+
+```bash
+cat docs/specs/<version>.md
+```
+
+**If the spec file does not exist**, halt immediately with this error:
+
+```
+Error: No spec found at docs/specs/<version>.md.
+
+Before running plan-milestones, a human must write the spec using the template:
+  docs/specs/TEMPLATE.md
+
+Write the spec, commit it, and then re-run plan-milestones.
+```
+
+Do not invent scope, goals, or research questions. Everything in Steps 1–4 must be grounded
+in the spec. The spec is the single source of truth.
+
 ### Step 1 — Assess Current State
 
 ```bash
@@ -39,24 +61,23 @@ and what gaps or follow-ups were identified.
 
 ### Step 2 — Define the Next Version Scope
 
-Based on what exists, determine the next version to plan. Use the following principles:
+Use the spec's **Scope**, **Constraints**, and **Success Criteria** sections to anchor the
+version scope. Do not override or extend what the spec defines.
 
 **Version naming**: choose a meaningful identifier (MVP, v1.1, v2, etc.) — not M3/M4.
 The milestone titles must contain either "Research" or "Implementation" (or "Impl") so
 the pipeline workers can identify their type.
 
-**Scope heuristic**:
-- MVP / first version: the smallest useful thing — what must work for a single human operator?
-- Each subsequent version: one coherent capability increment — not a kitchen sink
-- A version's research phase answers only what's needed for *that version's* implementation
+**Scope document** — write a brief version scope in your thinking before creating anything.
+This must mirror the spec — not re-derive it:
 
-**Scope document** — write a brief version scope in your thinking before creating anything:
 ```
 Version: <name>
-Goal: <one sentence>
-Included: <3-5 bullet points of what this version delivers>
-Excluded (next version): <what's explicitly out of scope>
-Seed research questions: <3-7 open questions that must be answered before implementation>
+Goal: <from spec Overview>
+Included: <from spec Scope section>
+Excluded (next version): <from spec Non-Goals section>
+Seed research questions: <from spec Key Unknowns section — not invented>
+Constraints: <from spec Constraints section>
 ```
 
 ### Step 3 — Create Milestones
@@ -75,10 +96,15 @@ gh api repos/<owner>/<repo>/milestones \
 
 ### Step 4 — File Seed Research Issues
 
-File 3–7 seed research issues for the new research milestone. These are the highest-priority
-blocking questions — not an exhaustive list. The research-worker will discover more.
+File seed research issues for the new research milestone. Source the research questions
+**directly from the spec's Key Unknowns section** — do not invent questions.
 
-For each seed issue:
+Apply the `[BLOCKS_IMPL]` filter: only file an issue if not knowing the answer would block
+implementation. A Key Unknown in the spec that is answerable in 10 seconds or that does not
+change the design is not worth a standalone issue — note it inline instead.
+
+For each qualifying Key Unknown:
+
 ```bash
 gh issue create \
   --repo <owner>/<repo> \
@@ -88,6 +114,10 @@ gh issue create \
   --body "$(cat <<'EOF'
 ## Background
 <Why this question matters for implementation>
+
+## Spec Reference
+Derived from the Key Unknowns section of docs/specs/<version>.md:
+> <exact quote of the Key Unknown from the spec>
 
 ## Research Areas
 - <specific sub-question 1>
@@ -102,15 +132,12 @@ EOF
 )"
 ```
 
-Apply the `[BLOCKS_IMPL]` standard: only file issues that would block the implementation
-phase if unanswered. Nice-to-have questions are noted in a comment, not as issues.
-
 ### Step 5 — Report
 
 Print:
 - Milestones created (names, purposes)
 - Seed research issues filed (numbers, titles)
-- Explicit scope boundaries (what's in, what's out, what's next)
+- Explicit scope boundaries (what's in, what's out, what's next) — sourced from the spec
 - Suggested order of operations: which research issues to dispatch first
 
 File the next pipeline stage issue:
@@ -121,11 +148,13 @@ gh issue create --title "Run research-worker for <research milestone>" --label "
 Post a Notion report under "CC Autonomous Coding Sessions"
 (parent page ID: `317bb275-6a02-803d-a59f-dc56c3527942`) with:
 - **Title**: `Milestone Plan — {YYYY-MM-DD} — {repo name} — {version name}`
-- **Body**: version scope, milestones created, seed issues, next steps
+- **Body**: version scope (from spec), milestones created, seed issues, next steps
 
 ## Constraints
 
+- **Spec is required** — plan-milestones must not run without a spec file at `docs/specs/<version>.md`
+- **Spec is authoritative** — scope, constraints, and research questions come from the spec; do not override or extend them
 - **Maximum 2 versions planned at once** — never plan 3 versions ahead
 - **Seed issues only** — do not attempt to enumerate all research questions; research-worker discovers more
-- **Scope boundaries are explicit** — every version plan must say what is out of scope and why
+- **Scope boundaries are explicit** — every version plan must say what is out of scope and why (sourced from spec Non-Goals)
 - **No implementation issues** — plan-milestones creates only research milestones and seed research issues; design-worker creates impl issues after research completes
