@@ -11,6 +11,7 @@ Entry points:
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import json
 import os
 import re
@@ -2584,25 +2585,143 @@ def health_cmd(repo: str | None, as_json: bool) -> None:
     chk = session.load(checkpoint_path)
     report = health.check_all(config, chk)
     if as_json:
-        import dataclasses
-        import json as _json
-
-        click.echo(_json.dumps(dataclasses.asdict(report), indent=2))
+        click.echo(json.dumps(dataclasses.asdict(report), indent=2))
     else:
         click.echo(health.format_report(report))
     raise SystemExit(0 if not report.fatal else 1)
 
 
 @composer.command("cost")
-def cost() -> None:
+@click.option("--repo", default=None, help="Filter to a specific repo (OWNER/REPO)")
+@click.option("--stage", default=None, help="Filter to a specific stage")
+def cost(repo: str | None, stage: str | None) -> None:
     """Show cost ledger summary."""
     config = load_config()
-    checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
-    _chk = session.load(checkpoint_path)
-    _config, _checkpoint = startup_sequence(
-        config=config,
-        checkpoint_path=checkpoint_path,
-        milestone="",
-        stage="cost",
+    entries = logger.read_cost_ledger(
+        config.log_dir.expanduser(),
+        repo=repo,
+        stage=stage,
     )
-    click.echo("Not yet implemented")
+
+    if not entries:
+        click.echo("No cost entries found.")
+        return
+
+    # Group by repo -> stage: {repo: {stage: {sessions, input, output, cost}}}
+    grouped: dict[str, dict[str, dict[str, Any]]] = {}
+    for entry in entries:
+        entry_repo: str = entry.get("repo") or "(unknown)"
+        entry_stage: str = entry.get("stage") or "(unknown)"
+        if entry_repo not in grouped:
+            grouped[entry_repo] = {}
+        if entry_stage not in grouped[entry_repo]:
+            grouped[entry_repo][entry_stage] = {
+                "sessions": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost_usd": 0.0,
+            }
+        agg = grouped[entry_repo][entry_stage]
+        agg["sessions"] += 1
+        agg["input_tokens"] += entry.get("input_tokens", 0) or 0
+        agg["output_tokens"] += entry.get("output_tokens", 0) or 0
+        cost_val = entry.get("total_cost_usd")
+        agg["cost_usd"] += cost_val if cost_val is not None else 0.0
+
+    # Column widths
+    col_stage = 16
+    col_sessions = 8
+    col_input = 15
+    col_output = 13
+    col_cost = 15
+    sep = (
+        "+"
+        + "-" * (col_stage + 2)
+        + "+"
+        + "-" * (col_sessions + 2)
+        + "+"
+        + "-" * (col_input + 2)
+        + "+"
+        + "-" * (col_output + 2)
+        + "+"
+        + "-" * (col_cost + 2)
+        + "+"
+    )
+    header = (
+        "| "
+        + "Stage".ljust(col_stage)
+        + " | "
+        + "Sessions".rjust(col_sessions)
+        + " | "
+        + "Input Tokens".rjust(col_input)
+        + " | "
+        + "Output Tokens".rjust(col_output)
+        + " | "
+        + "Est. Cost (USD)".rjust(col_cost)
+        + " |"
+    )
+
+    grand_sessions = 0
+    grand_input = 0
+    grand_output = 0
+    grand_cost = 0.0
+
+    for entry_repo, stages in sorted(grouped.items()):
+        click.echo(f"\nRepo: {entry_repo}")
+        click.echo(sep)
+        click.echo(header)
+        click.echo(sep)
+
+        repo_sessions = 0
+        repo_input = 0
+        repo_output = 0
+        repo_cost = 0.0
+
+        for entry_stage, agg in sorted(stages.items()):
+            s = agg["sessions"]
+            i = agg["input_tokens"]
+            o = agg["output_tokens"]
+            c = agg["cost_usd"]
+            repo_sessions += s
+            repo_input += i
+            repo_output += o
+            repo_cost += c
+            row = (
+                "| "
+                + entry_stage.ljust(col_stage)
+                + " | "
+                + f"{s:,}".rjust(col_sessions)
+                + " | "
+                + f"{i:,}".rjust(col_input)
+                + " | "
+                + f"{o:,}".rjust(col_output)
+                + " | "
+                + f"${c:,.2f}".rjust(col_cost)
+                + " |"
+            )
+            click.echo(row)
+
+        click.echo(sep)
+        total_row = (
+            "| "
+            + "TOTAL".ljust(col_stage)
+            + " | "
+            + f"{repo_sessions:,}".rjust(col_sessions)
+            + " | "
+            + f"{repo_input:,}".rjust(col_input)
+            + " | "
+            + f"{repo_output:,}".rjust(col_output)
+            + " | "
+            + f"${repo_cost:,.2f}".rjust(col_cost)
+            + " |"
+        )
+        click.echo(total_row)
+        click.echo(sep)
+
+        grand_sessions += repo_sessions
+        grand_input += repo_input
+        grand_output += repo_output
+        grand_cost += repo_cost
+
+    num_repos = len(grouped)
+    click.echo(f"\nGrand total across {num_repos} repo(s): ${grand_cost:,.2f}")
