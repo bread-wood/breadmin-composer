@@ -511,7 +511,693 @@ internal TypeScript implementation may have the correct JSON path reading regard
 
 ---
 
+<<<<<<< Updated upstream
 ## 6. Sources
+=======
+## 6. Section 3: Empirical Evidence for billing_error in Stream-JSON (Issue #95)
+
+This section records the findings of issue #95 research, which sought to empirically verify
+whether the `billing_error` value actually appears in the top-level `error` field of `assistant`
+events in `claude -p --output-format stream-json` output when HTTP 402 occurs — and to confirm
+the `result.subtype`, `result.result` text, stderr behavior, and exit code for the 402 path.
+
+### 6.1 Status of Empirical Verification (March 2026)
+
+**No live stream-json capture of a billing_error event exists in any publicly accessible source
+as of March 2026.** The research for issue #95 produced the following updated confidence
+assessment:
+
+| Research Area | Prior Status (Doc #87) | Status After Issue #95 Research |
+|---------------|----------------------|--------------------------------|
+| `assistant.error == "billing_error"` top-level JSON path | INFERRED — likely | STRUCTURALLY CONFIRMED (JSON path from issue #505); value for 402 still unconfirmed by live capture |
+| `result.subtype` for 402 | INFERRED — likely `"error_during_execution"` | CONFLICT IDENTIFIED — see Section 6.3 |
+| `result.result` text for 402 | Unknown | Still unknown — no empirical capture |
+| `billing_error` as a valid value for the `error` field | DOCUMENTED — TypeScript SDK reference, Elixir changelog | MULTI-SOURCE CONFIRMED — TypeScript SDK docs, Python SDK issue #505 exception hierarchy, Elixir v0.18.0 changelog |
+| 402 does not emit `rate_limit_event` | DOCUMENTED | CONFIRMED — TypeScript SDK `SDKRateLimitEvent` is header-driven; `resetsAt`/`utilization` fields only populated from `anthropic-ratelimit-unified-*` headers |
+| Stderr output for 402 | Unknown | Still unknown — no empirical capture |
+| Exit code for 402 | INFERRED — `1` | Still inferred — no empirical capture |
+
+### 6.2 Confirmed JSON Structure for `assistant` Events with `error` Field
+
+[STRUCTURALLY CONFIRMED] Issue #505 (anthropics/claude-agent-sdk-python, filed January 23, 2026,
+closed February 3, 2026) provided live-captured JSON output from the Claude CLI for two error
+conditions:
+
+**Error `"unknown"` (invalid model name):**
+
+```json
+{
+  "type": "assistant",
+  "message": {
+    "id": "ad53c326-dd50-4203-a91b-e963212193c4",
+    "container": null,
+    "model": "<synthetic>",
+    "role": "assistant",
+    "stop_reason": "stop_sequence",
+    "stop_sequence": "",
+    "type": "message",
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "server_tool_use": { "web_search_requests": 0, "web_fetch_requests": 0 },
+      "service_tier": null,
+      "cache_creation": { "ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 0 }
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "API Error: 404 {\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"model: invalid-model-name\"},\"request_id\":\"req_011CXPSzXgANnbQwoKHgQthD\"}"
+      }
+    ],
+    "context_management": null
+  },
+  "parent_tool_use_id": null,
+  "session_id": "92cb3340-de00-45d6-84c3-d5a2010a32e2",
+  "uuid": "4ddbcd7b-ed40-4d48-adb8-b281cf3769b6",
+  "error": "unknown"
+}
+```
+
+**Error `"authentication_failed"` (invalid API key):**
+
+```json
+{
+  "type": "assistant",
+  "message": {
+    "id": "1c65e36b-5819-408a-ac23-7ce20b8cadeb",
+    "container": null,
+    "model": "<synthetic>",
+    "role": "assistant",
+    "stop_reason": "stop_sequence",
+    "stop_sequence": "",
+    "type": "message",
+    "usage": { "input_tokens": 0, "output_tokens": 0, ... },
+    "content": [
+      { "type": "text", "text": "Invalid API key · Fix external API key" }
+    ],
+    "context_management": null
+  },
+  "parent_tool_use_id": null,
+  "session_id": "9e89813f-cb7b-41fb-8a38-135f2707d675",
+  "uuid": "9ade6dfc-fbbb-4d7e-9a21-515d3297463b",
+  "error": "authentication_failed"
+}
+```
+
+These are the **only two live-captured `assistant` events with top-level `error` fields** in the
+public record as of March 2026. They establish the definitive structure:
+
+1. The `error` field is a **string** at the top level of the JSON object.
+2. It is co-present with a `message` object that has `model: "<synthetic>"` and
+   `stop_reason: "stop_sequence"` — these appear to be placeholder values used by the Claude Code
+   CLI when constructing synthetic error response envelopes.
+3. The `content` array contains a `text` block with a human-readable error description. For
+   `"unknown"`, the text embeds the raw API error JSON. For `"authentication_failed"`, the text
+   is the interactive UI error message.
+4. The `uuid`, `session_id`, and `parent_tool_use_id` fields are present in the same positions
+   as a normal `assistant` event.
+
+**Inference for `"billing_error"`:** The JSON structure for a `"billing_error"` event is expected
+to follow the same pattern:
+
+```json
+{
+  "type": "assistant",
+  "message": {
+    "id": "<synthetic-id>",
+    "model": "<synthetic>",
+    "role": "assistant",
+    "stop_reason": "stop_sequence",
+    "stop_sequence": "",
+    "type": "message",
+    "usage": { "input_tokens": 0, "output_tokens": 0, ... },
+    "content": [
+      {
+        "type": "text",
+        "text": "<billing-related error text — exact wording UNKNOWN>"
+      }
+    ]
+  },
+  "parent_tool_use_id": null,
+  "session_id": "<session_id>",
+  "uuid": "<uuid>",
+  "error": "billing_error"
+}
+```
+
+The `"billing_error"` string value is [DOCUMENTED — TypeScript Agent SDK reference, Elixir SDK
+v0.18.0 changelog, Python SDK issue #505 exception hierarchy]. The content text value is
+[UNKNOWN — no live capture].
+
+### 6.3 Critical Finding: `result.subtype` Discrepancy for 402 vs. 429
+
+Research for issue #95 surfaced a significant discrepancy between what the TypeScript SDK type
+definitions document and what the CLI actually emits in stream-json output:
+
+**TypeScript Agent SDK (`SDKResultMessage`) documents only these error subtypes:**
+- `"error_max_turns"`
+- `"error_during_execution"`
+- `"error_max_budget_usd"`
+- `"error_max_structured_output_retries"`
+
+**Elixir SDK `ClaudeCode.Types` v0.28.0 `result_subtype()` documents only:**
+- `:error_max_turns`
+- `:error_during_execution`
+- `:error_max_budget_usd`
+- `:error_max_structured_output_retries`
+
+**Neither SDK type definition includes `"error_during_operation"`.**
+
+However, doc #23 Section 2.2 confirms with a live-captured JSON payload that the Claude CLI
+**actually emits `"error_during_operation"` as the `result.subtype` for HTTP 429 rate limits:**
+
+```json
+{
+  "type": "result",
+  "subtype": "error_during_operation",
+  "is_error": true,
+  "result": "API Error: Rate limit reached",
+  "session_id": "2ab1d239-9581-4d03-a895-af10c9fcb863",
+  "total_cost_usd": 0.0
+}
+```
+
+This means `"error_during_operation"` is an **undocumented runtime subtype** — the CLI emits it
+but neither the TypeScript nor Elixir SDK type definitions include it. This finding has direct
+consequences for issue #95's question about how to distinguish 402 billing failures from 429 rate
+limits:
+
+**Revised assessment for `result.subtype` for HTTP 402:**
+
+The prior inference (doc #87 Section 2.2) was that 402 would produce
+`"error_during_execution"`, while 429 produces `"error_during_operation"`. This was based on the
+SDK type documentation, which listed `"error_during_operation"` as absent from the documented
+set and `"error_during_execution"` as the catch-all for unhandled API errors.
+
+**That inference is now WEAKENED.** Given that:
+1. The CLI emits `"error_during_operation"` for 429 despite it not being in the SDK type
+   definitions, and
+2. No live capture of the 402 path exists,
+
+it is now possible — and perhaps likely — that the CLI also emits `"error_during_operation"` for
+402, rather than `"error_during_execution"`. If the 402 error fires during an API call (mid-turn)
+the same code path that handles 429 mid-turn errors may also handle 402, using the same subtype.
+
+This means the `result.subtype` discriminator between 402 and 429 is **unreliable without live
+verification**. The `assistant.error: "billing_error"` field remains the most robust
+discriminator available.
+
+**Updated `result.subtype` confidence table:**
+
+| `result.subtype` value | In SDK type defs? | Confirmed in live output? | Maps to which HTTP error? |
+|------------------------|------------------|--------------------------|--------------------------|
+| `"error_during_operation"` | No — NOT in TypeScript or Elixir SDK | Yes — confirmed in doc #23 for HTTP 429 | HTTP 429 (confirmed); HTTP 402 (unknown — possibly same path) |
+| `"error_during_execution"` | Yes — TypeScript SDK, Elixir SDK | Not confirmed by live capture for 402 | Unknown — originally inferred for 402, now uncertain |
+
+### 6.4 `SDKRateLimitEvent` Schema: Confirmed Not Applicable to 402
+
+[CONFIRMED from TypeScript Agent SDK official documentation, March 2026]
+
+The current `SDKRateLimitEvent` type definition:
+
+```typescript
+type SDKRateLimitEvent = {
+  type: "rate_limit_event";
+  rate_limit_info: {
+    status: "allowed" | "allowed_warning" | "rejected";
+    resetsAt?: number;
+    utilization?: number;
+  };
+  uuid: UUID;
+  session_id: string;
+};
+```
+
+The `resetsAt` and `utilization` fields are optional (not always present). This event is
+exclusively driven by the `anthropic-ratelimit-unified-*` response headers. HTTP 402 responses
+from the billing authorization layer do not include these headers, so `rate_limit_event` is
+definitively not emitted for 402 billing failures.
+
+**Note on schema vs. earlier research (doc #63):** Doc #63 Section 3.1 documented additional
+fields in the `rate_limit_info` object including `isUsingOverage`, `overageDisabledReason`, and
+`overageStatus`. These fields are not present in the official TypeScript SDK type definition.
+They appear to be extensions present in the internal stream-json schema but not exposed in the
+public SDK type definition. Conductor reading raw stream-json output should still watch for
+these fields as they may appear at runtime despite being absent from the public type schema.
+
+### 6.5 `billing_error` Value: Multi-Source Confirmation
+
+The string `"billing_error"` as a valid value for the `SDKAssistantMessage.error` field is
+confirmed from three independent sources:
+
+1. **TypeScript Agent SDK official reference** (`platform.claude.com/docs/en/agent-sdk/typescript`,
+   March 2026): States "`SDKAssistantMessageError` is one of: `'authentication_failed'`,
+   `'billing_error'`, `'rate_limit'`, `'invalid_request'`, `'server_error'`, or `'unknown'`."
+
+2. **Elixir `ClaudeCode` SDK changelog v0.18.0** (2026-02-10, corresponding to CC v2.1.37):
+   Documents schema alignment with CLI v2.1.37, introducing `AssistantMessage.error` with values
+   including `:billing_error`, `:authentication_failed`, `:rate_limit`, `:invalid_request`,
+   `:server_error`, `:unknown`.
+
+3. **Python SDK issue #505 exception hierarchy** (commit wingding12, 2026-02-03): The PR that
+   fixed the wrong JSON path reading also added a full exception class hierarchy including
+   `BillingError` mapped to the `"billing_error"` error string. While the original bug report
+   focused on `"unknown"` and `"authentication_failed"`, the `BillingError` class addition
+   confirms `"billing_error"` is an anticipated value in the SDK implementation.
+
+**What remains unconfirmed:** Whether `"billing_error"` is actually emitted by the Claude CLI
+binary when the internal API call returns HTTP 402. All three sources above establish the type
+definition/schema, not a live runtime observation. The `"billing_error"` value may be defined
+but never emitted in practice (e.g., if 402 errors are handled differently in the CLI binary
+than in the Python SDK wrapper).
+
+### 6.6 The `content[].text` Field in Billing Error Events
+
+When the `assistant` event carries `"error": "billing_error"`, the `message.content[0].text`
+field is expected to contain a human-readable billing error description. From the structural
+pattern established by the `"unknown"` error (which embeds the raw API error JSON in the text):
+
+```
+"API Error: 402 {<raw 402 response body JSON>}"
+```
+
+If this pattern holds for billing errors, the `content[].text` would contain the raw 402 JSON
+body — making it a secondary source for the `error.type` and `error.message` values from Section
+1.4. However, the `"authentication_failed"` error does NOT follow this raw-embed pattern (it uses
+a human-readable message instead), so the pattern is not guaranteed to hold for all error types.
+
+The content text format for `"billing_error"` is **UNKNOWN** without a live capture.
+
+### 6.7 Updated Conductor Detection Rule (Superseding Section 3.1)
+
+Based on issue #95 research, the conductor detection rule from Section 3.1 is updated as follows:
+
+```python
+def classify_from_stream(
+    result_event: dict | None,
+    assistant_events: list[dict],
+) -> ErrorClass:
+    # PRIMARY: Check for billing_error in any assistant event (most reliable discriminator)
+    for event in assistant_events:
+        if event.get("type") == "assistant" and event.get("error") == "billing_error":
+            return ErrorClass.BILLING_FAILURE
+
+    if result_event is None:
+        return ErrorClass.UNKNOWN
+
+    subtype = result_event.get("subtype", "")
+    result_text = (result_event.get("result") or "").lower()
+    errors = result_event.get("errors", [])  # error_during_execution path uses .errors list
+
+    # SECONDARY: error_during_operation — confirmed for 429; may also fire for 402
+    if subtype == "error_during_operation":
+        # Distinguish by result text
+        if "rate limit" in result_text or "rate_limit" in result_text:
+            return ErrorClass.RATE_LIMIT_FIVE_HOUR  # further classify via doc #23 Section 5
+        if "billing" in result_text or "payment" in result_text:
+            return ErrorClass.BILLING_FAILURE       # fallback if billing_error field absent
+        # AMBIGUOUS: could be 402 without billing text or other mid-operation error
+        return ErrorClass.API_ERROR_UNCLASSIFIED
+
+    # TERTIARY: error_during_execution — catch-all for other unhandled errors
+    if subtype == "error_during_execution":
+        for error_str in errors:
+            if "billing" in error_str.lower() or "payment" in error_str.lower():
+                return ErrorClass.BILLING_FAILURE
+        return ErrorClass.EXECUTION_ERROR
+
+    ...
+```
+
+**Key change from Section 3.1:** The `billing_error` assistant event check remains the primary
+signal, but the secondary `error_during_operation` path now handles BOTH the 429 rate limit case
+AND a possible 402 billing case (if the 402 path uses the same subtype). The `error_during_execution`
+path is demoted to tertiary because the live-confirmed 429 subtype is `error_during_operation`,
+not `error_during_execution`, contrary to what was previously inferred.
+
+### 6.8 Stderr Behavior: Structural Inference from Confirmed Error Examples
+
+The live captures from issue #505 confirm that for `"unknown"` and `"authentication_failed"`
+errors, the error text is surfaced **within the stream-json `assistant` event content**, not on
+stderr. This is consistent with the inferred behavior from Section 2.5: in stream-json mode,
+the primary error surface is the `assistant` event `error` field and `content[].text`, not stderr.
+
+Whether the 402 path also surfaces its error exclusively via stream-json (rather than also writing
+to stderr) is still unconfirmed. The `"authentication_failed"` example (`"Invalid API key · Fix
+external API key"`) matches the stderr message that interactive mode would show — suggesting the
+text may appear on both streams.
+
+### 6.9 Remaining Unknowns After Issue #95 Research
+
+| Question | Status |
+|----------|--------|
+| Does `"billing_error"` actually fire at runtime when HTTP 402 is received? | STILL UNKNOWN — no live capture |
+| What is `result.subtype` for 402? `"error_during_operation"` or `"error_during_execution"`? | NEWLY UNCERTAIN — prior inference weakened by `error_during_operation` being undocumented for 429 yet actually emitted |
+| What is `result.result` text content for 402? | STILL UNKNOWN |
+| Does `content[].text` embed raw 402 JSON body? | PLAUSIBLE (from `"unknown"` pattern) but UNCONFIRMED |
+| What is stderr output for 402? | STILL UNKNOWN |
+| Is there a CLI version where `"billing_error"` was added that correlates to a testable release? | INFERRED: v2.1.37 (from Elixir v0.18.0 changelog) |
+
+### 6.10 Confidence Summary for Conductor Implementation (Updated)
+
+| Signal | Confidence | Basis |
+|--------|-----------|-------|
+| `event.get("error") == "billing_error"` detects a billing error | HIGH (schema documented) / UNVERIFIED (runtime) | TypeScript SDK, Elixir changelog, Python SDK exception class |
+| `event.get("error")` is at the top level of `assistant` event JSON | HIGH CONFIRMED | Live captures from issue #505 |
+| 402 does not emit `rate_limit_event` | HIGH CONFIRMED | TypeScript SDK type definition; header-driven mechanism |
+| `result.subtype` distinguishes 402 from 429 | LOW — NEWLY UNCERTAIN | `error_during_operation` confirmed for 429 but NOT in official type defs; 402 subtype unknown |
+| `result.result` text contains "billing" for 402 | UNVERIFIED — useful as fallback | Structural inference from error text embedding pattern |
+
+---
+
+## 7. result.subtype Disambiguation for HTTP 402 (Issue #100)
+
+This section records the findings of issue #100 research, which sought to resolve
+the specific question: does `claude -p --output-format stream-json` emit
+`"error_during_operation"` or `"error_during_execution"` as the `result.subtype` when
+the underlying API call receives HTTP 402?
+
+### 7.1 Research Question Recap
+
+Section 6.3 (issue #95 research) identified a conflict between SDK type documentation and
+observed CLI behaviour:
+
+- Both the TypeScript Agent SDK (`SDKResultMessage`) and Elixir `ClaudeCode` SDK
+  (`result_subtype()`) document only four error subtypes:
+  `"error_max_turns"`, `"error_during_execution"`, `"error_max_budget_usd"`,
+  `"error_max_structured_output_retries"`.
+- Neither SDK type definition includes `"error_during_operation"`.
+- Yet doc #23 Section 2.2 confirmed via live-captured JSON that the CLI **actually
+  emits `"error_during_operation"` for HTTP 429 rate limit events**, making it an
+  undocumented runtime subtype.
+
+Issue #100 asks: does HTTP 402 take the same code path as HTTP 429 (emitting
+`"error_during_operation"`), or a different path (emitting `"error_during_execution"`,
+the documented catch-all)?
+
+### 7.2 SDK Type Definitions — Current State (March 2026)
+
+[DOCUMENTED from official TypeScript Agent SDK reference, March 2026, v0.2.63]
+
+The current `SDKResultMessage` type definition in the TypeScript Agent SDK:
+
+```typescript
+type SDKResultMessage =
+  | {
+      type: "result";
+      subtype: "success";
+      uuid: UUID;
+      session_id: string;
+      duration_ms: number;
+      duration_api_ms: number;
+      is_error: boolean;
+      num_turns: number;
+      result: string;
+      stop_reason: string | null;
+      total_cost_usd: number;
+      usage: NonNullableUsage;
+      modelUsage: { [modelName: string]: ModelUsage };
+      permission_denials: SDKPermissionDenial[];
+      structured_output?: unknown;
+    }
+  | {
+      type: "result";
+      subtype:
+        | "error_max_turns"
+        | "error_during_execution"
+        | "error_max_budget_usd"
+        | "error_max_structured_output_retries";
+      uuid: UUID;
+      session_id: string;
+      duration_ms: number;
+      duration_api_ms: number;
+      is_error: boolean;
+      num_turns: number;
+      stop_reason: string | null;
+      total_cost_usd: number;
+      usage: NonNullableUsage;
+      modelUsage: { [modelName: string]: ModelUsage };
+      permission_denials: SDKPermissionDenial[];
+      errors: string[];
+    };
+```
+
+**Confirmed finding**: `"error_during_operation"` is still **absent** from the TypeScript
+SDK `SDKResultMessage` type definition as of March 2026 (SDK v0.2.63, which is the
+current version). This is unchanged from the state documented in Section 6.3 of this
+document.
+
+[DOCUMENTED from Elixir `ClaudeCode` SDK, v0.28.0 (current as of March 2026)]
+
+The Elixir `result_subtype()` type lists:
+- `:success`
+- `:error_max_turns`
+- `:error_during_execution`
+- `:error_max_budget_usd`
+- `:error_max_structured_output_retries`
+
+**Confirmed finding**: `"error_during_operation"` is also absent from the current Elixir
+SDK type definition. Both SDK implementations consistently omit it from the documented
+type union.
+
+### 7.3 The Persistent Undocumented Subtype: `"error_during_operation"`
+
+The evidence base from prior research (doc #23 Section 2.2; doc #87 Section 6.3)
+established that the Claude CLI emits `"error_during_operation"` for HTTP 429 rate limit
+failures at runtime, despite this subtype being absent from both SDK type definitions.
+This is not a stale or resolved discrepancy — the TypeScript SDK has been updated to
+v0.2.63 and still does not include `"error_during_operation"` in `SDKResultMessage`.
+
+The confirmed live-captured JSON for a 429 rate limit result event remains (from doc #23
+Section 2.2):
+
+```json
+{
+  "type": "result",
+  "subtype": "error_during_operation",
+  "is_error": true,
+  "result": "API Error: Rate limit reached",
+  "session_id": "2ab1d239-9581-4d03-a895-af10c9fcb863",
+  "total_cost_usd": 0.0
+}
+```
+
+Note that this live-captured event uses the legacy schema (no `uuid`, `duration_ms`,
+`usage`, `errors` fields). This suggests the event was captured from an older CLI version.
+The current SDK type definition for error results includes `uuid`, `usage`, `modelUsage`,
+`permission_denials`, and `errors` fields. The live-captured 429 result event may have
+been emitted by a version before these fields were added, or the `"error_during_operation"`
+path may not populate all fields that the `"error_during_execution"` path does.
+
+### 7.4 Empirical Evidence Gap: No 402 Result Event Capture Exists
+
+[CONFIRMED STILL UNKNOWN — March 2026]
+
+No live-captured stream-json output for a 402 billing failure result event has been
+identified in any accessible public source as of March 2026. The searches conducted for
+issue #100 found:
+
+1. No GitHub issue in `anthropics/claude-code`, `anthropics/claude-agent-sdk-typescript`,
+   or `openclaw/openclaw` contains a raw stream-json dump showing a 402 billing failure
+   result event with a visible `subtype` field.
+
+2. The `openclaw/openclaw` issue #30484 (the primary source for 402 behaviour) focuses on
+   HTTP status code classification, not on stream-json event structure. No commenter
+   published a raw JSONL capture from `claude -p --output-format stream-json`.
+
+3. The SFEIR Institute CI/CD headless mode documentation does not cover billing error
+   result event structure.
+
+4. No npm package, community project, or blog post examined during this research
+   published a captured 402 billing failure result event.
+
+**The `result.subtype` for HTTP 402 remains empirically unverified.**
+
+### 7.5 Structural Inference: Two Candidate Code Paths in the CLI
+
+The core uncertainty is which internal code path handles HTTP 402 in the Claude CLI's
+stream-json layer. Two candidate models:
+
+**Model A — 402 shares the rate-limit error path (emits `"error_during_operation"`):**
+
+HTTP 402 and HTTP 429 are both transient API-layer rejections that terminate the current
+API request. If the CLI's error dispatcher classifies all non-2xx API responses that are
+"mid-operation" through a common handler — which then maps them to
+`"error_during_operation"` regardless of specific HTTP status — then 402 would produce
+the same subtype as 429.
+
+Supporting evidence for Model A:
+- The `openclaw/openclaw` PR #30780 ("Treat Anthropic 402 as rate_limit") treats 402 as
+  equivalent to a rate limit at the HTTP client level. This suggests the two errors share
+  similar handling semantics in the CLI ecosystem.
+- HTTP 402 fires during an active API call (mid-operation), the same lifecycle point as
+  HTTP 429. If the CLI routes "API call failed while executing a tool or model step" to a
+  single error handler, both HTTP 402 and HTTP 429 would map to the same `subtype`.
+- The name `"error_during_operation"` is semantically appropriate for a billing failure
+  that terminates an API call mid-execution — it is an error during an operation in the
+  same sense as a rate limit rejection.
+
+**Model B — 402 uses the generic execution-error path (emits `"error_during_execution"`):**
+
+If the CLI has separate handlers for rate-limit-specific responses (which benefit from
+special retry logic, `rate_limit_event` emission, and `anthropic-ratelimit-unified-*`
+header parsing) vs. other non-retryable API errors (which fall through to a generic
+handler), then 402 — which is not retried and does not have rate limit headers — would
+fall into the generic path, which may emit `"error_during_execution"`.
+
+Supporting evidence for Model B:
+- The SDK type definitions consistently list `"error_during_execution"` as the documented
+  catch-all error subtype for unhandled errors. This is consistent with a design where
+  `"error_during_execution"` is the "all other errors" bucket.
+- The original inference in this document (Section 2.2) was based on this logic: 429 takes
+  a special rate-limit-specific path (producing the undocumented `"error_during_operation"`
+  subtype), while 402 — which lacks rate-limit-specific handling — takes the generic path
+  (producing the documented `"error_during_execution"` subtype).
+
+**Assessment**: Neither model can be confirmed without a live 402 stream-json capture.
+Model A now has stronger logical support (given the observed pattern that mid-operation
+API errors emit `"error_during_operation"`) but Model B cannot be excluded.
+
+### 7.6 Assistant Event Check Ordering: Why `assistant.error` Must Come First
+
+The `assistant.error` check must come before any `result.subtype` check in the conductor's
+error classifier. This is not merely a style preference — it is architecturally required
+for two independent reasons:
+
+**Reason 1: `result.subtype` cannot distinguish 402 from 429 if both emit
+`"error_during_operation"`**
+
+If Model A (Section 7.5) is correct, both HTTP 402 billing failures and HTTP 429 rate
+limit failures produce `subtype: "error_during_operation"`. In that case:
+
+- A classifier that checks `subtype` first would misclassify 402 as a rate limit event
+  (since `"error_during_operation"` is only live-confirmed for 429).
+- Only the `assistant.error == "billing_error"` field in the `assistant` event that
+  precedes the `result` event can distinguish the two.
+
+**Reason 2: The `assistant` event arrives before the `result` event in the stream**
+
+In `stream-json` mode, the `assistant` event (carrying `error: "billing_error"`) is emitted
+before the terminal `result` event. A streaming classifier processing events in order
+can detect the billing failure early — before the `result` event even arrives — by
+watching for `assistant` events with the `error` field set.
+
+The conductor detection rule from Section 6.7 is therefore the correct ordering:
+
+```python
+def classify_from_stream(
+    result_event: dict | None,
+    assistant_events: list[dict],
+) -> ErrorClass:
+    # STEP 1: Check assistant events first (most reliable; arrives before result event)
+    for event in assistant_events:
+        if event.get("type") == "assistant" and event.get("error") == "billing_error":
+            return ErrorClass.BILLING_FAILURE
+
+    if result_event is None:
+        return ErrorClass.UNKNOWN
+
+    subtype = result_event.get("subtype", "")
+    result_text = (result_event.get("result") or "").lower()
+    errors = result_event.get("errors", [])
+
+    # STEP 2: Check result subtype (secondary; only reached if no assistant.error)
+    if subtype == "error_during_operation":
+        # Confirmed for HTTP 429; possibly also fired for HTTP 402 (Model A)
+        # Distinguish by result_text if billing_error assistant event was absent
+        if "rate limit" in result_text or "rate_limit" in result_text:
+            return ErrorClass.RATE_LIMIT_FIVE_HOUR
+        if "billing" in result_text or "payment" in result_text:
+            return ErrorClass.BILLING_FAILURE  # fallback if billing_error absent
+        return ErrorClass.API_ERROR_UNCLASSIFIED
+
+    if subtype == "error_during_execution":
+        # Documented catch-all; may fire for 402 (Model B scenario)
+        for error_str in errors:
+            if "billing" in error_str.lower() or "payment" in error_str.lower():
+                return ErrorClass.BILLING_FAILURE
+        return ErrorClass.EXECUTION_ERROR
+    ...
+```
+
+**IMPORTANT**: The `billing_error` check on `assistant.error` has [HIGH schema
+confidence, UNVERIFIED runtime] status (Section 6.10). The check is structurally correct
+but the `"billing_error"` value has not been confirmed to actually appear in live
+stream-json output for HTTP 402.
+
+### 7.7 Implications If the `assistant.error` Field Is Absent for 402
+
+A critical failure mode for the conductor: if HTTP 402 does NOT cause an `assistant`
+event with `error: "billing_error"` to be emitted (e.g., the 402 is handled so early
+that no assistant event is generated, or the CLI binary version predates the
+`billing_error` value), then the conductor falls back to `result.subtype`.
+
+In that fallback scenario:
+
+- If `subtype == "error_during_operation"` and result text contains "billing":
+  classify as `BILLING_FAILURE` (fragile — depends on text pattern).
+- If `subtype == "error_during_operation"` and result text contains "rate limit":
+  classify as `RATE_LIMIT_*` (correct for 429; would misclassify 402 if the 402
+  result text does not contain billing keywords).
+- If `subtype == "error_during_execution"`:
+  classify as `EXECUTION_ERROR` initially; check `errors[]` for billing keywords.
+- If neither subtype appears or `result_event` is `None`:
+  classify as `UNKNOWN`.
+
+This reinforces the importance of obtaining a live 402 stream-json capture to validate
+the fallback path.
+
+### 7.8 The Case Against a Distinct Billing-Specific Result Subtype
+
+Issue #100 also asks whether a distinct `"error_billing"` or `"error_payment_required"`
+subtype might exist. The evidence strongly argues against this:
+
+1. **TypeScript SDK type union does not include any billing-specific result subtype.**
+   As of v0.2.63 (March 2026), the four documented error subtypes are
+   `"error_max_turns"`, `"error_during_execution"`, `"error_max_budget_usd"`, and
+   `"error_max_structured_output_retries"`. None is billing-specific.
+2. **No Elixir SDK changelog entry documents a billing subtype addition.** The Elixir
+   SDK changelogs from v0.18.0 through v0.28.0 reference `billing_error` only in the
+   context of the `AssistantMessage.error` field, not as a new `result_subtype`.
+3. **No GitHub issue or PR in any reviewed repository references a
+   `"error_billing"` or `"error_payment_required"` result subtype.** If such a subtype
+   existed or was being planned, it would almost certainly appear in SDK type definition
+   changes or changelog entries.
+
+**Conclusion**: No distinct billing-specific `result.subtype` exists. The billing failure
+signal is located in the `assistant.error` field, not in `result.subtype`.
+
+### 7.9 Confidence Summary and Updated Findings Table
+
+| Question | Status After Issue #100 Research |
+|----------|----------------------------------|
+| Is `result.subtype` `"error_during_operation"` for HTTP 402? | UNKNOWN — no live capture. Model A (same path as 429) is plausible but unconfirmed. |
+| Is `result.subtype` `"error_during_execution"` for HTTP 402? | UNKNOWN — possible if 402 uses a separate generic handler (Model B). |
+| Is there a distinct `"error_billing"` or `"error_payment_required"` subtype? | CONFIRMED NOT — absent from TypeScript SDK v0.2.63 and Elixir SDK v0.28.0; absent from all reviewed changelogs and issues. |
+| Is `"error_during_operation"` still absent from the TypeScript SDK type defs? | CONFIRMED — absent from TypeScript SDK v0.2.63 (current, March 2026). |
+| Is `"error_during_operation"` still absent from the Elixir SDK type defs? | CONFIRMED — absent from Elixir ClaudeCode v0.28.0 (current, March 2026). |
+| Does the `assistant.error` check need to come before the `result.subtype` check? | CONFIRMED REQUIRED — `result.subtype` alone cannot distinguish 402 from 429 if both emit `"error_during_operation"`. |
+| Does a live 402 stream-json result event capture exist in any public source? | CONFIRMED NOT — no public capture found as of March 2026. |
+| Is the Section 6.7 conductor classification rule still correct? | YES — the ordering (`assistant.error` first, `subtype` second) is correct and no update is required. |
+
+### 7.10 Remaining Open Question
+
+The specific `result.subtype` value for HTTP 402 is the sole unresolved question from
+this research. Resolving it requires a live capture of the full `claude -p
+--output-format stream-json 2>&1` output when a Max plan account with Extra Usage enabled
+triggers a billing authorization failure. The capture method is documented in Section 5.2
+of this document.
+
+**Until that capture is available, the conductor MUST treat `assistant.error:
+"billing_error"` as the authoritative 402 discriminator, and MUST NOT rely on
+`result.subtype` alone to distinguish 402 billing failures from 429 rate limit events.**
+
+---
+
+## 8. Sources
+>>>>>>> Stashed changes
 
 - [Anthropic API Errors Documentation](https://platform.claude.com/docs/en/api/errors) — Official
   list of documented HTTP status codes and `error.type` values. HTTP 402 is NOT listed. States that
