@@ -1,4 +1,4 @@
-# breadmin-conductor
+# breadmin-composer
 
 Headless Claude Code orchestrator CLI. Runs the full research → design → implementation
 pipeline as standalone CLI commands that invoke `claude -p` without a human at the terminal.
@@ -22,7 +22,7 @@ Each product version flows through all four stages. See `CLAUDE.md` for the full
 ## Package structure
 
 ```
-src/conductor/
+src/composer/
 ├── cli.py          ← click commands: impl-worker, research-worker, design-worker, conductor
 ├── config.py       ← Config pydantic model, env/flag resolution
 ├── runner.py       ← claude -p subprocess invocation, stream-json capture

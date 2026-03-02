@@ -1,10 +1,10 @@
-"""CLI entry points for breadmin-conductor.
+"""CLI entry points for breadmin-composer.
 
 Entry points:
   impl-worker      → impl_worker()
   research-worker  → research_worker()
   design-worker    → design_worker()
-  conductor        → conductor()
+  composer         → composer()
 """
 
 from __future__ import annotations
@@ -73,11 +73,11 @@ def design_worker(
 
 
 @click.group()
-def conductor() -> None:
-    """Conductor admin commands."""
+def composer() -> None:
+    """Composer admin commands."""
 
 
-@conductor.command("health")
+@composer.command("health")
 @click.option("--repo", default=None, help="Repo to check (OWNER/REPO)")
 def health(repo: str | None) -> None:
     """Run preflight checks."""
@@ -85,7 +85,7 @@ def health(repo: str | None) -> None:
     raise NotImplementedError("Not yet implemented")
 
 
-@conductor.command("cost")
+@composer.command("cost")
 def cost() -> None:
     """Show cost ledger summary."""
     # TODO: implement cost ledger reader

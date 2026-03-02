@@ -1,4 +1,4 @@
-"""Preflight health checks for conductor commands.
+"""Preflight health checks for composer commands.
 
 Verifies that required external tools and credentials are available
 before attempting to invoke claude -p.

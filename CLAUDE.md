@@ -1,16 +1,16 @@
-# breadmin-conductor — Orchestration Rules
+# breadmin-composer — Orchestration Rules
 
 This repo follows the Orchestrator-Dispatch Protocol defined in `~/.claude/CLAUDE.md`.
 The rules below are repo-specific additions and overrides.
 
 ## Repo Context
 
-`breadmin-conductor` is a Python CLI package. Source lives in `src/conductor/`.
+`breadmin-composer` is a Python CLI package. Source lives in `src/composer/`.
 Tests live in `tests/`. The package provides four entry points:
 - `impl-worker` — headless implementation issue processing loop
 - `research-worker` — headless research processing loop
 - `design-worker` — translates research docs into scoped impl issues
-- `conductor` — admin commands (health, cost)
+- `composer` — admin commands (health, cost)
 
 ## Worker Pipeline
 
@@ -53,11 +53,11 @@ Agents are scoped to these modules. One agent per module at a time:
 
 | Module | Scope |
 |--------|-------|
-| `config` | `src/conductor/config.py` |
-| `runner` | `src/conductor/runner.py`, `src/conductor/session.py` |
-| `health` | `src/conductor/health.py` |
-| `logging` | `src/conductor/logger.py` |
-| `cli` | `src/conductor/cli.py`, `src/conductor/skills/` (all skill files) |
+| `config` | `src/composer/config.py` |
+| `runner` | `src/composer/runner.py`, `src/composer/session.py` |
+| `health` | `src/composer/health.py` |
+| `logging` | `src/composer/logger.py` |
+| `cli` | `src/composer/cli.py`, `src/composer/skills/` (all skill files) |
 | `infra` | `pyproject.toml`, `.github/`, `CLAUDE.md`, `README.md` |
 | `docs` | `docs/` |
 
