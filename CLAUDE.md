@@ -111,7 +111,7 @@ uv add --dev <package>    # add dev dependency
 
 ## Default Branch
 
-`main`
+`mainline`
 
 ## Pipeline Stage Tracking
 
