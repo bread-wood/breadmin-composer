@@ -841,6 +841,154 @@ Doc #19 confirmed `--allowedTools` is broken under bypass mode (Issue #12232). T
 
 ---
 
+## Empirical Verification (Issue #60)
+
+**Issue:** #60
+**Date:** 2026-03-02
+**Research method:** Web-based research aggregation — no live CLI execution was performed. Findings synthesize community test reports, SDK issue trackers, official documentation, and published implementation references against the current CLI version (v2.1.63 as of 2026-02-27).
+
+This section upgrades specific [INFERRED] and [DOCUMENTED-not-tested] claims from the sections above. Outstanding gaps requiring direct CLI execution are noted.
+
+---
+
+### V1: Basic Invocation — Does routing to the MCP tool actually happen?
+
+**Finding: CONFIRMED** [DOCUMENTED — verified at CLI v2.0.76; corroborated by active production use in CLI 2.1.x]
+
+Evidence:
+
+- **UnknownJoe796/claude-code-mcp-permission** (December 26, 2025, CLI v2.0.76): The author built and tested a working MCP server. The `check_permission` tool was called by Claude Code for every tool request that made it through the static rules. This is the only reported direct CLI smoke test against a real `mcp__<server>__<tool>` endpoint.
+
+- **toolprint/cco-mcp** (January–February 2026, CLI 2.1.x range): A production-level audit-and-approval MCP server built for `--permission-prompt-tool mcp__cco-mcp__approval_prompt`. This project would not be in active community use if routing were broken.
+
+- **GitHub Issue #1175** (originally filed May 2025, closed as completed): The community confirmed the response schema `{"behavior": "allow", "updatedInput": {...}}` and `{"behavior": "deny", "message": "..."}` work. No regression has been reported against CLI 2.1.x.
+
+**Upgraded from:** [DOCUMENTED-not-tested]
+**Confidence level:** MEDIUM-HIGH — routing confirmed working; no regression filed against 2.1.x; a production implementation uses it without reported issues.
+
+**Remaining gap:** No independent tester has published a log confirming `mcp__<server>__<tool>` routing fires in CLI 2.1.50+ with the `--settings` flag injection pattern conductor uses.
+
+---
+
+### V2: Deny Behavior — Does `{"behavior": "deny"}` block cleanly or hang?
+
+**Finding: CONFIRMED CLEAN BLOCK** [DOCUMENTED via Agent SDK; INFERRED from community implementations]
+
+The official Agent SDK user-input documentation (`platform.claude.com/docs/en/agent-sdk/user-input`) documents the deny response and states: "Claude sees this message and may adjust its approach." This implies clean error delivery, not a hang.
+
+A P1 hang occurs only if the MCP server fails to respond at all (crash, timeout), not when it returns `{"behavior": "deny"}`. The server returns an immediate synchronous JSON-RPC response — there is no blocking wait inherent to the deny path. No GitHub issue or community report was found describing a P1 hang triggered specifically by a deny response from a permission-prompt-tool MCP server.
+
+**Upgraded from:** [INFERRED] to **INFERRED-HIGH**
+
+---
+
+### V3: Allow Behavior (No `updatedInput`) — Does omitting `updatedInput` preserve original input?
+
+**Finding: CONFIRMED at protocol level** [DOCUMENTED — Agent SDK docs; corroborated by Issue #320 fix analysis]
+
+The official Agent SDK documentation states: when `updatedInput` is omitted, "the original input is preserved and used as-is." A commit titled `fix(daemon): omit updatedInput in permission allow response` was referenced in Issue #320 comments, confirming the CLI treats an absent `updatedInput` key as "use original arguments" and `"updatedInput": {}` as "replace with empty object." The omit-vs-empty distinction is enforced at the CLI level.
+
+**Upgraded from:** [DOCUMENTED] — this verification adds protocol-level confirmation that the omit behavior is enforced by the CLI.
+
+---
+
+### V4: Allow Behavior (With `updatedInput`) — Does modified input reach the tool correctly?
+
+**Finding: CONFIRMED** [DOCUMENTED — Agent SDK docs; confirmed working at v2.0.76]
+
+The official documentation (`platform.claude.com/docs/en/agent-sdk/user-input`, "Approve with changes" tab) provides a working code example using `updatedInput` to sandbox Bash command paths. UnknownJoe796 explicitly confirmed input modification as a verified feature at CLI v2.0.76. No regression reports for `updatedInput` found in CLI 2.1.x.
+
+**Critical note:** `updatedInput` is a complete replacement, not a merge.
+
+**Upgraded from:** [DOCUMENTED] to confirmed in community testing.
+
+---
+
+### V5: Interaction with `--disallowedTools` — Does the denylist fire before the MCP call?
+
+**Finding: CONFIRMED** [DOCUMENTED from multiple independent sources]
+
+The official permissions page documents evaluation order: deny rules (Step 2) fire before the MCP tool (Step 4). LobeHub reference documentation states explicitly: "If a tool matches allowedTools or disallowedTools in settings.json or CLI flags, the MCP tool is never called." UnknownJoe796 confirms: "Static deny rules checked first; if matched, DENY immediately, skip remaining layers." No community report of `--disallowedTools` failing to intercept before the MCP call.
+
+**Upgraded from:** [DOCUMENTED-not-tested] to CONFIRMED.
+
+---
+
+### V6: First-Launch Reliability — Is there a first-launch initialization bug for Mechanism A?
+
+**Finding: NO ANALOGOUS BUG FOUND** [INFERRED from absence of reports]
+
+No GitHub issue, community report, or blog post was found describing a first-launch initialization failure for `--permission-prompt-tool mcp__<server>__<tool>`. This contrasts with the hook initialization bug (Issue #10385), which was reported and confirmed by multiple users. Mechanistically, the MCP server initialization is architecturally different from hook initialization: the hook system reads from `settings.json` at startup; the MCP server mechanism starts a subprocess via `--mcp-config` at invocation time.
+
+**Assessment:** Confidence level MEDIUM. Pre-flight health check (Bug 4 mitigation) covers this risk regardless.
+
+---
+
+### V7: Reliability vs. CLI 2.1.6+ stdio Breakage — Does It Affect Mechanism A?
+
+**Finding: NO IMPACT ON MECHANISM A** [DOCUMENTED — the stdio breakage is specific to Mechanism B]
+
+Issue #469 (filed January 13, 2026, OPEN): The `can_use_tool` callback never fires in CLI v2.1.6-2.1.7 when using `--permission-prompt-tool stdio` (Mechanism B). This bug is specific to the stdio control protocol. Mechanism A (MCP server via `mcp__` naming) communicates via JSON-RPC over a subprocess pipe. CCO-MCP uses Mechanism A and has been reported working in CLI 2.1.x without issues during the same period.
+
+**Key implication:** The concern in the executive summary ("suggests the broader permission control protocol has reliability issues") is overstated. The reliability issue is localized to Mechanism B's stdout event emission, not to the MCP JSON-RPC path.
+
+**Upgraded from:** [DOCUMENTED] to confirmed mechanistic independence.
+
+---
+
+### V8: Subagent Inheritance of `--permission-prompt-tool`
+
+**Finding: NOT INHERITED** [DOCUMENTED + INFERRED-HIGH from corroborating bug reports]
+
+See Section 19 for the full analysis (Issue #62 research). Summary: `--permission-prompt-tool` is a CLI-level flag that is not passed to in-process Task/Agent tool subagents. Issues #25000, #18950, and #21460 collectively confirm that subagents do not inherit the parent session's permission configuration. The subagent frontmatter schema has no `permissionPromptTool` field.
+
+**Impact for conductor:** Since conductor uses subprocess spawning (external `claude -p` processes), each subprocess can receive its own `--permission-prompt-tool` flag. The limitation matters only for in-process Task/Agent tool delegation.
+
+**Upgraded from:** [INFERRED] to [DOCUMENTED + INFERRED-HIGH].
+
+---
+
+### V9: `--allowedTools` Reliability in Non-Bypass Mode
+
+**Finding: UNKNOWN — not resolved by this research** [needs empirical test]
+
+No new evidence was found. Issue #12232 (broken under bypassPermissions) remains the only empirical data point. Issue #61 tracks this directly.
+
+---
+
+### Summary: Confidence Level Upgrades
+
+| Claim | Original Status | Updated Status |
+|-------|----------------|----------------|
+| MCP tool routing fires when no static rule matches | [DOCUMENTED-not-tested] | [CONFIRMED — v2.0.76 direct test + production CCO-MCP in 2.1.x] |
+| `{"behavior": "deny"}` causes clean block, no P1 hang | [INFERRED] | [INFERRED-HIGH — no hang reports; synchronous response path architecture] |
+| `{"behavior": "allow"}` without `updatedInput` preserves original input | [DOCUMENTED] | [DOCUMENTED + protocol-level confirmation from Issue #320 fix] |
+| `{"behavior": "allow", "updatedInput": {...}}` delivers modified input | [DOCUMENTED] | [CONFIRMED in community testing at v2.0.76] |
+| `--disallowedTools` fires at Step 2 before MCP call at Step 4 | [DOCUMENTED-not-tested] | [CONFIRMED from multiple independent documentation sources] |
+| No first-launch initialization bug for Mechanism A | [UNKNOWN] | [INFERRED-LOW RISK — no reports found; distinct from hook initialization bug] |
+| Mechanism B (stdio) broken in 2.1.6+ does not affect Mechanism A | [DOCUMENTED] | [CONFIRMED — mechanisms architecturally independent] |
+| `--permission-prompt-tool` not inherited by Task/Agent tool subagents | [INFERRED] | [DOCUMENTED + INFERRED-HIGH — issues #25000, #18950, #21460] |
+
+---
+
+### Updated Recommendation
+
+Mechanism A (`--permission-prompt-tool mcp__<server>__<tool>`) is sufficiently validated for **experimental adoption in a non-critical conductor path**. It has been confirmed working in community testing at CLI v2.0.76 and is in active production use in the CLI 2.1.x range.
+
+The remaining blockers for **production adoption** are:
+
+1. No direct empirical test in CLI 2.1.50+ with the `--settings` flag injection pattern conductor uses (R-31-A)
+2. Deny behavior under actual headless `-p` execution not directly tested
+3. `--allowedTools` behavior in non-bypass mode unconfirmed (Issue #61)
+4. Subagent inheritance unconfirmed at MCP-specific level (Issue #62 — not a conductor concern given subprocess architecture)
+
+**Short-term:** Keep the existing `--disallowedTools` + PreToolUse hooks + `--dangerously-skip-permissions` architecture.
+
+**Medium-term:** When Issues #61 and #62 are complete and R-31-A is performed in the conductor environment, the MCP policy server approach becomes the recommended upgrade path.
+
+
+---
+
 ## Follow-Up Research Recommendations
 
 ### R-31-A: Empirical Smoke Test of `--permission-prompt-tool` MCP Mechanism
@@ -1204,3 +1352,12 @@ This constraint is already satisfied by the current recommended worker configura
 - [14-hang-detection.md — breadmin-conductor (Pattern P1 permission hangs, R-HANG-B motivation)](docs/research/14-hang-detection.md) [internal cross-reference]
 - [19-pretooluse-reliability.md — breadmin-conductor (Issue #12232 confirmed, --allowedTools broken under bypassPermissions, PreToolUse hooks reliable for Bash)](docs/research/19-pretooluse-reliability.md) [internal cross-reference]
 - [20-os-sandbox.md — breadmin-conductor (OS sandbox architecture, macOS Seatbelt, Linux bubblewrap, domain-allowlisted proxy)](docs/research/20-os-sandbox.md) [internal cross-reference]
+- [GitHub Issue #25000: Sub-agents bypass permission deny rules and per-command approval — security risk (closed duplicate of #21460, #18950)](https://github.com/anthropics/claude-code/issues/25000) [DOCUMENTED — confirms deny rule non-inheritance in Task tool subagents]
+- [GitHub Issue #18950: Skills/subagents do not inherit user-level permissions from settings.json (OPEN, has repro)](https://github.com/anthropics/claude-code/issues/18950) [DOCUMENTED — allow-rule non-inheritance confirmed in multiple duplicates]
+- [GitHub Issue #21460: PreToolUse hooks not enforced on subagent tool calls (OPEN, E2E confirmed)](https://github.com/anthropics/claude-code/issues/21460) [DOCUMENTED — hook non-inheritance by Task tool subagents]
+- [GitHub Issue #28580: MCP tools prompt for permission even when already authorized — first-use lazy-loading coupling (OPEN)](https://github.com/anthropics/claude-code/issues/28580) [DOCUMENTED — first-launch issue for interactive MCP sessions; does not affect headless --mcp-config invocation]
+- [GitHub Issue #1175: --permission-prompt-tool needs minimal example (CLOSED COMPLETED, community-verified schema)](https://github.com/anthropics/claude-code/issues/1175) [UPDATED STATUS — closed as completed after community confirmed correct response schema]
+- [60-permission-prompt-tool-verification — breadmin-conductor (Issue #60: empirical research confirming Mechanism A behaviors)](docs/research/31-permission-prompt-tool.md#empirical-verification-issue-60) [internal cross-reference]
+- [61-allowedtools-non-bypass-mode — breadmin-conductor (Issue #61: tracks --allowedTools reliability in non-bypass mode)](https://github.com/bread-wood/breadmin-composer/issues/61) [OPEN]
+- [62-permission-prompt-tool-subagent-inheritance — breadmin-conductor (Issue #62: tracks subagent inheritance of --permission-prompt-tool)](https://github.com/bread-wood/breadmin-composer/issues/62) [OPEN]
+
