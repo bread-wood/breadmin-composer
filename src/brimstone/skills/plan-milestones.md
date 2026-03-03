@@ -63,14 +63,18 @@ research before implementation can begin.
 ### Step 1 — Assess Current State
 
 ```bash
-# What milestones already exist?
-gh milestone list --repo <owner>/<repo>
+# What milestones already exist? (save for dup check in Step 3)
+EXISTING_MILESTONES=$(gh api repos/<owner>/<repo>/milestones --paginate -q '.[].title')
+
+# What issues already exist? (save titles for dup check in Steps 4–5)
+EXISTING_ISSUES=$(gh issue list --repo <owner>/<repo> --state all --limit 500 \
+  --json title --jq '.[].title')
 
 # What has been built so far?
-gh issue list --state closed --limit 200 --json number,title,milestone,labels
+gh issue list --repo <owner>/<repo> --state closed --limit 200 --json number,title,milestone,labels
 
 # What is in progress or planned?
-gh issue list --state open --limit 200 --json number,title,milestone,labels
+gh issue list --repo <owner>/<repo> --state open --limit 200 --json number,title,milestone,labels
 ```
 
 ### Step 2 — Define the Version Scope
@@ -93,12 +97,16 @@ by `stage/*` label, not by milestone name.
 
 ### Step 3 — Create Milestone
 
-Create a single milestone for the version.
+Create a single milestone for the version. Skip if it already exists.
 
 ```bash
-gh api repos/<owner>/<repo>/milestones \
-  -f title="<Version>" \
-  -f description="<one-line goal for this version>"
+if echo "$EXISTING_MILESTONES" | grep -qxF "<Version>"; then
+  echo "Milestone '<Version>' already exists — skipping creation"
+else
+  gh api repos/<owner>/<repo>/milestones \
+    -f title="<Version>" \
+    -f description="<one-line goal for this version>"
+fi
 ```
 
 ### Step 4 — Decompose Into a Full Research Queue
@@ -170,15 +178,19 @@ For each genuine unknown identified above, apply the `[BLOCKS_IMPL]` filter befo
 > an implementation task. Skip questions answerable in seconds or that only affect
 > fine-grained implementation details.
 
-For each issue that passes the filter:
+For each issue that passes the filter, check for a duplicate before filing:
 
 ```bash
-gh issue create \
-  --repo <owner>/<repo> \
-  --title "Research: <concise question>" \
-  --label "research,stage/research" \
-  --milestone "<Version>" \
-  --body "$(cat <<'EOF'
+TITLE="Research: <concise question>"
+if echo "$EXISTING_ISSUES" | grep -qxF "$TITLE"; then
+  echo "Issue '$TITLE' already exists — skipping"
+else
+  gh issue create \
+    --repo <owner>/<repo> \
+    --title "$TITLE" \
+    --label "research,stage/research" \
+    --milestone "<Version>" \
+    --body "$(cat <<'EOF'
 ## Why This Matters
 <How the answer changes a design decision. Be specific — name the implementation component affected.>
 
@@ -192,12 +204,13 @@ The research doc must answer the above questions and include a concrete recommen
 (not just a list of options) with rationale.
 
 ## Deliverable
-A research doc at docs/research/<NN>-<slug>.md
+A research doc at docs/research/<Version>/<NN>-<slug>.md
 
 ## Dependencies
 <Depends on: #N, or "None">
 EOF
 )"
+fi
 ```
 
 Group related sub-questions into a single issue rather than filing one issue per sub-question.
@@ -211,13 +224,18 @@ Print:
 - Scope boundaries: what's in, what's out, what's deferred
 - Suggested dispatch order: which issues to send to research-worker first (dependency order)
 
-File the next pipeline stage issue:
+File the next pipeline stage issue (skip if it already exists):
 ```bash
-gh issue create \
-  --repo <owner>/<repo> \
-  --title "Run research-worker for <version>" \
-  --label "pipeline" \
-  --milestone "<version>"
+PIPELINE_TITLE="Run research-worker for <version>"
+if echo "$EXISTING_ISSUES" | grep -qxF "$PIPELINE_TITLE"; then
+  echo "Pipeline issue '$PIPELINE_TITLE' already exists — skipping"
+else
+  gh issue create \
+    --repo <owner>/<repo> \
+    --title "$PIPELINE_TITLE" \
+    --label "pipeline" \
+    --milestone "<version>"
+fi
 ```
 
 ## Constraints

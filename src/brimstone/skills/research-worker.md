@@ -91,7 +91,7 @@ will be dispatched. Issues scoring < 2/3 are closed with `wont-research`.
 
 Research agents are dispatched with `Agent(isolation: "worktree")` and given:
 - A specific research topic and detailed scope
-- Instructions to write a comprehensive markdown document in `docs/research/`
+- Instructions to write a comprehensive markdown document in `docs/research/<milestone>/`
 - Instructions to include a **"Follow-Up Research Recommendations"** section
 - Instructions to cross-reference existing research docs
 - Instructions to flag contradictions with other docs
@@ -132,15 +132,15 @@ Launch sub-agents in parallel using `Agent(isolation: "worktree")`.
 > You are implementing research issue #N on branch `<branch-name>`.
 > Your task: <research topic and scope from issue body>.
 > Milestone: <milestone name>
-> Allowed scope: `docs/research/`
+> Allowed scope: `docs/research/<milestone>/`
 >
 > Steps:
 > 1. `git checkout <branch-name>`
 > 2. Read the issue in full: `gh issue view <N>`
 > 3. Read all related existing research docs referenced in the issue body
-> 4. Read ALL existing docs in `docs/research/` to understand what's already covered
+> 4. Read ALL existing docs in `docs/research/<milestone>/` to understand what's already covered
 > 5. Research the topic extensively using web search
-> 6. Write a comprehensive document at `docs/research/<NN>-<slug>.md`:
+> 6. Write a comprehensive document at `docs/research/<milestone>/<NN>-<slug>.md`:
 >    - MUST include a "Follow-Up Research Recommendations" section
 >    - MUST include a "Sources" section with full citations
 >    - MUST cross-reference related research docs

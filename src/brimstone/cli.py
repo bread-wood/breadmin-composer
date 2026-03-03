@@ -1,16 +1,14 @@
-"""CLI entry points for breadmin-composer.
+"""CLI entry points for brimstone.
 
 Entry point:
-  composer         → composer()
+  brimstone         → brimstone()
 
-All pipeline stages are subcommands of the ``composer`` group:
-  composer plan-milestones
-  composer research-worker
-  composer design-worker
-  composer plan-issues
-  composer impl-worker
-  composer health
-  composer cost
+Subcommands:
+  brimstone run     — run one or more pipeline stages for a milestone
+  brimstone init    — upload spec + seed milestone and research issues
+  brimstone adopt   — adopt an existing repo (stub)
+  brimstone health  — preflight health checks
+  brimstone cost    — cost ledger summary
 """
 
 from __future__ import annotations
@@ -29,15 +27,15 @@ from typing import Any
 
 import click
 
-from composer import health, logger, runner, session
-from composer.config import (
+from brimstone import health, logger, runner, session
+from brimstone.config import (
     Config,
     OrchestratorNestingError,
     build_subprocess_env,
     load_config,
 )
-from composer.health import FatalHealthCheckError
-from composer.session import Checkpoint
+from brimstone.health import FatalHealthCheckError
+from brimstone.session import Checkpoint
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -47,6 +45,7 @@ MAX_RETRIES: int = 3
 MAX_PROMPT_CHARS: int = 16_000
 TRIAGE_LABEL: str = "triage"
 RESEARCH_LABEL: str = "research"
+DESIGN_LABEL: str = "stage/design"
 BACKOFF_SLEEP_SECONDS: int = 30
 STALL_MAX_ITERATIONS: int = 5  # 5 × BACKOFF_SLEEP_SECONDS = 2.5 min before escalation
 
@@ -92,6 +91,12 @@ def startup_sequence(
         ValueError:               If resume_run_id is provided and does not
                                   match the checkpoint's run_id.
     """
+    # Set GH_TOKEN so that orchestrator _gh() calls authenticate as yeast-bot.
+    # pydantic-settings loads GITHUB_TOKEN from .env but does not write to
+    # os.environ, so we propagate it here manually.
+    if config.github_token:
+        os.environ["GH_TOKEN"] = config.github_token
+
     # Step 1: Nesting guard (also checked by load_config, but be explicit here)
     if os.environ.get("CLAUDECODE") == "1":
         raise OrchestratorNestingError(
@@ -171,6 +176,37 @@ def inject_skill(skill_name: str, base_prompt: str) -> str:
     skill_text = skill_path.read_text(encoding="utf-8")
     skill_text = _apply_headless_policy(skill_text)
     return base_prompt + "\n\n---\n\n" + skill_text
+
+
+def write_skill_tmp(skill_name: str) -> Path:
+    """Write skills/<skill_name>.md to a named temp file and return its path.
+
+    The caller is responsible for deleting the file after use.
+
+    Skill content is passed via ``--append-system-prompt`` rather than
+    concatenated into the ``-p`` argument, because passing large prompts
+    via ``-p`` causes Claude Code to exit silently before emitting any
+    stream-json events.
+
+    Args:
+        skill_name: Filename stem without extension (e.g. "research-worker").
+
+    Returns:
+        Path to the written temp file.
+
+    Raises:
+        FileNotFoundError: If skills/<skill_name>.md does not exist.
+    """
+    skill_path = Path(__file__).parent / "skills" / f"{skill_name}.md"
+    skill_text = _apply_headless_policy(skill_path.read_text(encoding="utf-8"))
+    fd, tmp_path = tempfile.mkstemp(suffix=f"-{skill_name}.md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(skill_text)
+    except Exception:
+        os.unlink(tmp_path)
+        raise
+    return Path(tmp_path)
 
 
 def _apply_headless_policy(text: str) -> str:
@@ -418,7 +454,7 @@ def _scaffold_new_repo(name: str) -> str:
     # Write a minimal README
     readme_path = os.path.join(repo_path, "README.md")
     with open(readme_path, "w", encoding="utf-8") as fh:
-        fh.write(f"# {name}\n\nInitialized by breadmin-composer.\n")
+        fh.write(f"# {name}\n\nInitialized by brimstone.\n")
 
     # Write a minimal .gitignore
     gitignore_path = os.path.join(repo_path, ".gitignore")
@@ -550,10 +586,19 @@ def _resolve_repo(repo_arg: str | None) -> tuple[str, str | None]:
 
     # -----------------------------------------------------------------------
     # Case 4: Plain name with no slashes.
-    # First check if the repo already exists on GitHub (gh repo view).
+    # -----------------------------------------------------------------------
+
+    # Sub-case 4a: If we're already inside a git repo whose remote name
+    # matches repo_arg, use the cwd — don't scaffold a nested directory.
+    cwd = os.getcwd()
+    if _is_git_repo(cwd):
+        cwd_remote = _infer_github_repo_from_path(cwd)
+        if cwd_remote and cwd_remote.split("/")[-1] == repo_arg:
+            return cwd_remote, cwd
+
+    # Sub-case 4b: Check if the repo already exists on GitHub (gh repo view).
     # If it does, use it as a remote-only reference — no local scaffolding.
     # Only scaffold when the repo genuinely does not exist yet.
-    # -----------------------------------------------------------------------
     view_result = subprocess.run(
         ["gh", "repo", "view", repo_arg, "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
         capture_output=True,
@@ -715,6 +760,192 @@ def _list_open_research_issues(repo: str, milestone: str) -> list[dict[str, Any]
         filtered.append(issue)
 
     return filtered
+
+
+def _list_in_progress_research_issues(repo: str, milestone: str) -> list[dict[str, Any]]:
+    """Return open research issues that are currently in-progress for *milestone*.
+
+    Used at research-worker startup to resume monitoring PRs from a previous run.
+    """
+    result = _gh(
+        [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--label",
+            f"{RESEARCH_LABEL},in-progress",
+            "--milestone",
+            milestone,
+            "--json",
+            "number,title",
+            "--limit",
+            "50",
+        ],
+        repo=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+
+
+def _count_all_open_research_issues(repo: str, milestone: str) -> int:
+    """Return the total count of open research issues for *milestone*, including in-progress.
+
+    Used by the design-worker Gate 1 check to verify all research is done.
+    """
+    result = _gh(
+        [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--label",
+            RESEARCH_LABEL,
+            "--milestone",
+            milestone,
+            "--json",
+            "number",
+            "--limit",
+            "200",
+        ],
+        repo=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        return 0
+    try:
+        return len(json.loads(result.stdout))
+    except json.JSONDecodeError:
+        return 0
+
+
+def _list_open_design_issues(repo: str, milestone: str) -> list[dict[str, Any]]:
+    """Return open, unassigned, non-in-progress stage/design issues for *milestone*.
+
+    Args:
+        repo:      GitHub repository in ``owner/repo`` format.
+        milestone: Milestone name to scope the query.
+
+    Returns:
+        List of issue dicts with keys: number, title, body, labels, assignees.
+    """
+    result = _gh(
+        [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--label",
+            DESIGN_LABEL,
+            "--milestone",
+            milestone,
+            "--json",
+            "number,title,body,labels,assignees,milestone",
+            "--limit",
+            "200",
+        ],
+        repo=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    try:
+        issues: list[dict] = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+
+    filtered = []
+    for issue in issues:
+        if issue.get("assignees"):
+            continue
+        label_names = [lb.get("name", "") for lb in issue.get("labels", [])]
+        if "in-progress" in label_names:
+            continue
+        filtered.append(issue)
+    return filtered
+
+
+def _file_design_issue_if_missing(
+    repo: str,
+    milestone: str,
+    title: str,
+    body: str,
+) -> None:
+    """Create a ``stage/design`` issue with *title* in *repo* if it doesn't already exist.
+
+    Fetches all open+closed issues and checks for an exact title match before
+    creating, making this call idempotent on re-run.
+    """
+    result = _gh(
+        ["issue", "list", "--state", "all", "--limit", "500", "--json", "title"],
+        repo=repo,
+        check=False,
+    )
+    if result.returncode == 0:
+        try:
+            existing = {i["title"] for i in json.loads(result.stdout)}
+            if title in existing:
+                return
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    _gh(
+        [
+            "issue",
+            "create",
+            "--title",
+            title,
+            "--label",
+            DESIGN_LABEL,
+            "--milestone",
+            milestone,
+            "--body",
+            body,
+        ],
+        repo=repo,
+        check=False,
+    )
+
+
+def _doc_exists_on_default_branch(repo: str, path: str, default_branch: str) -> bool:
+    """Return True if *path* exists on *default_branch* in *repo*.
+
+    Uses the GitHub Contents API so no local checkout is required.
+    """
+    result = _gh(
+        ["api", f"repos/{repo}/contents/{path}?ref={default_branch}"],
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _get_default_branch_for_repo(repo: str) -> str:
+    """Return the default branch name for *repo* (falls back to ``"main"``)."""
+    result = _gh(
+        ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"],
+        repo=repo,
+        check=False,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    return "main"
+
+
+def _extract_module_from_design_issue(issue: dict[str, Any]) -> str:
+    """Extract the module name from a ``Design: LLD for <module>`` issue title.
+
+    Falls back to a slugified title if the expected pattern is not found.
+    """
+    title = issue.get("title", "")
+    match = re.search(r"[Dd]esign:\s*LLD\s+for\s+(.+)$", title)
+    if match:
+        return match.group(1).strip()
+    return _slugify(title)
 
 
 def _parse_dependencies(body: str) -> list[int]:
@@ -895,19 +1126,15 @@ def _keep_triage_issue(repo: str, issue_number: int, milestone: str) -> None:
 
 
 def _milestone_exists(repo: str, title: str) -> bool:
-    """Return True if an open milestone with *title* exists in *repo*."""
+    """Return True if a milestone with *title* exists in *repo* (open or closed)."""
     result = _gh(
-        ["milestone", "list", "--json", "title", "--limit", "100"],
-        repo=repo,
+        ["api", f"repos/{repo}/milestones", "--paginate", "-q", ".[].title"],
         check=False,
     )
     if result.returncode != 0:
         return False
-    try:
-        milestones: list[dict] = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return False
-    return any(ms.get("title") == title for ms in milestones)
+    titles = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return title in titles
 
 
 def _find_next_milestone(repo: str, current_milestone: str) -> str | None:
@@ -1063,6 +1290,7 @@ def _score_triage_issue(
         max_turns=5,
         timeout_seconds=config.agent_timeout_minutes * 60,
         model=config.model,
+        prefix="[triage] ",
     )
 
     if result.is_error:
@@ -1231,6 +1459,7 @@ def _classify_blocking_issues(
             max_turns=5,
             timeout_seconds=config.agent_timeout_minutes * 60,
             model=config.model,
+            prefix=f"[blocking-check #{issue_number}] ",
         )
 
         if result.is_error:
@@ -1295,6 +1524,35 @@ def _run_research_worker(
             err=True,
         )
         raise SystemExit(1)
+
+    # Resume: re-monitor any in-progress issues that already have open PRs.
+    # Unclaim issues that were in-progress but have no PR (agent crashed before creating one).
+    if not dry_run:
+        for stale in _list_in_progress_research_issues(repo, milestone):
+            stale_number: int = stale["number"]
+            pr_info = _find_pr_for_issue(repo=repo, issue_number=stale_number)
+            if pr_info:
+                pr_number, pr_branch = pr_info
+                click.echo(
+                    f"[research-worker] Resuming PR #{pr_number} for issue #{stale_number}",
+                    err=True,
+                )
+                _monitor_pr(
+                    pr_number=pr_number,
+                    branch=pr_branch,
+                    repo=repo,
+                    config=config,
+                    checkpoint=checkpoint,
+                    issue_number=stale_number,
+                )
+            else:
+                # Agent was in-progress but crashed before creating a PR — unclaim so
+                # the main loop can re-dispatch it.
+                _unclaim_issue(repo, stale_number)
+                click.echo(
+                    f"[research-worker] Unclaimed stale #{stale_number} (no PR found)",
+                    err=True,
+                )
 
     while True:
         # ------------------------------------------------------------------
@@ -1420,14 +1678,14 @@ def _run_research_worker(
             f"- Session Date: {today}\n\n"
             f"{body}"
         )
-        prompt = inject_skill("research-worker", base_prompt)
+        skill_tmp = write_skill_tmp("research-worker")
 
         if dry_run:
+            skill_tmp.unlink(missing_ok=True)
             click.echo(
                 f"[dry-run] Would dispatch research agent for issue "
                 f"#{issue_number}: {issue.get('title', '')}"
             )
-            click.echo(f"[dry-run] Prompt length: {len(prompt)} chars")
             # Simulate completion gate with no real work
             _run_completion_gate(
                 repo=repo,
@@ -1460,23 +1718,28 @@ def _run_research_worker(
         # STEP 7: Run the research agent
         # ------------------------------------------------------------------
         env = build_subprocess_env(config)
-        result = runner.run(
-            prompt=prompt,
-            allowed_tools=[
-                "Bash",
-                "Read",
-                "Edit",
-                "Write",
-                "Glob",
-                "Grep",
-                "WebSearch",
-                "WebFetch",
-            ],
-            env=env,
-            max_turns=100,
-            timeout_seconds=config.agent_timeout_minutes * 60,
-            model=config.model,
-        )
+        try:
+            result = runner.run(
+                prompt=base_prompt,
+                allowed_tools=[
+                    "Bash",
+                    "Read",
+                    "Edit",
+                    "Write",
+                    "Glob",
+                    "Grep",
+                    "WebSearch",
+                    "WebFetch",
+                ],
+                append_system_prompt_file=skill_tmp,
+                env=env,
+                max_turns=100,
+                timeout_seconds=config.agent_timeout_minutes * 60,
+                model=config.model,
+                prefix=f"[research-worker #{issue_number}] ",
+            )
+        finally:
+            skill_tmp.unlink(missing_ok=True)
 
         # ------------------------------------------------------------------
         # STEP 8: Handle result
@@ -1499,7 +1762,26 @@ def _run_research_worker(
         )
 
         if not result.is_error:
-            # Success: apply triage rubric to any follow-up issues
+            # Success: find the PR the agent created and monitor it
+            pr_info = _find_pr_for_issue(repo=repo, issue_number=issue_number)
+            if pr_info:
+                pr_number, pr_branch = pr_info
+                _monitor_pr(
+                    pr_number=pr_number,
+                    branch=pr_branch,
+                    repo=repo,
+                    config=config,
+                    checkpoint=checkpoint,
+                    issue_number=issue_number,
+                    # Research agents manage their own clones; rebase escalates to human
+                )
+            else:
+                click.echo(
+                    f"[research-worker] Warning: no open PR found for issue #{issue_number}",
+                    err=True,
+                )
+
+            # Apply triage rubric to any follow-up issues filed by the agent
             _apply_triage_rubric(
                 repo=repo,
                 milestone=milestone,
@@ -1601,10 +1883,28 @@ def _run_completion_gate(
         log_dir=config.log_dir.expanduser(),
     )
 
-    # File pipeline issue: Run design-worker for <milestone>
+    # File HLD design issue and pipeline issue
+    hld_title = f"Design: HLD for {milestone}"
     if dry_run:
+        click.echo(f"[dry-run] Would file: {hld_title!r}")
         click.echo(f"[dry-run] Would file: 'Run design-worker for {milestone}'")
     else:
+        _file_design_issue_if_missing(
+            repo=repo,
+            milestone=milestone,
+            title=hld_title,
+            body=(
+                "## Deliverable\n"
+                f"`docs/design/{milestone}/HLD.md`\n\n"
+                "## Instructions\n"
+                f"Read all merged research docs in `docs/research/{milestone}/`. Write the HLD. "
+                "For each module identified, file a `Design: LLD for <module>` issue "
+                "with label `stage/design` and this milestone. Check for duplicates first.\n\n"
+                "## Acceptance Criteria\n"
+                f"- `docs/design/{milestone}/HLD.md` committed and PR created\n"
+                "- One `Design: LLD for <module>` issue filed per module"
+            ),
+        )
         _file_pipeline_issue(
             repo=repo,
             next_worker="design-worker",
@@ -1616,7 +1916,7 @@ def _run_completion_gate(
     click.echo(
         f"Research milestone '{milestone}' complete. "
         f"Migrated {len(open_issues)} non-blocking issue(s). "
-        f"Filed 'Run design-worker for {milestone}' pipeline issue."
+        f"Filed HLD design issue and 'Run design-worker for {milestone}' pipeline issue."
     )
 
 
@@ -1752,6 +2052,53 @@ def _find_pr_for_branch(repo: str, branch: str) -> int | None:
     return None
 
 
+def _find_pr_for_issue(repo: str, issue_number: int) -> tuple[int, str] | None:
+    """Find an open PR that was created for *issue_number*.
+
+    Searches open PRs by head-branch prefix (``<N>-``) and by ``Closes #N``
+    in the PR body. Returns ``(pr_number, branch)`` or ``None``.
+
+    Args:
+        repo:         Repository in ``owner/repo`` format.
+        issue_number: Issue number to search for.
+
+    Returns:
+        ``(pr_number, head_branch)`` tuple, or ``None`` if not found.
+    """
+    result = _gh(
+        [
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "number,headRefName,body",
+            "--limit",
+            "100",
+        ],
+        repo=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        prs: list[dict] = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+
+    closes_pattern = f"#{issue_number}"
+    for pr in prs:
+        head: str = pr.get("headRefName") or ""
+        body: str = pr.get("body") or ""
+        # Branch prefix match is the most reliable signal
+        if head.startswith(f"{issue_number}-"):
+            return int(pr["number"]), head
+        # Fall back to body reference
+        if f"Closes {closes_pattern}" in body or f"Closes: {closes_pattern}" in body:
+            return int(pr["number"]), head
+    return None
+
+
 def _get_pr_checks_status(repo: str, pr_number: int) -> str:
     """Get the aggregate CI status for a PR.
 
@@ -1774,6 +2121,13 @@ def _get_pr_checks_status(repo: str, pr_number: int) -> str:
         check=False,
     )
     if result.returncode != 0:
+        # gh pr checks exits non-zero when no checks have been reported yet.
+        # Treat "no checks" as green so repos without CI don't stall forever.
+        no_checks_phrases = ("no checks", "no check runs")
+        stderr_lower = (result.stderr or "").lower()
+        stdout_lower = (result.stdout or "").lower()
+        if any(p in stderr_lower or p in stdout_lower for p in no_checks_phrases):
+            return "pass"
         return "pending"
 
     try:
@@ -1782,7 +2136,7 @@ def _get_pr_checks_status(repo: str, pr_number: int) -> str:
         return "pending"
 
     if not checks:
-        return "pending"
+        return "pass"  # no CI configured — treat as green
 
     statuses = []
     for check in checks:
@@ -1951,8 +2305,8 @@ def _monitor_pr(
     repo: str,
     config: Config,
     checkpoint: Checkpoint,
-    worktree_path: str,
     issue_number: int,
+    worktree_path: str = "",
     max_polls: int = _CI_MAX_POLLS,
     poll_interval: int = _CI_POLL_INTERVAL,
 ) -> bool:
@@ -1968,8 +2322,10 @@ def _monitor_pr(
         repo:          Repository in ``owner/repo`` format.
         config:        Config instance for logging.
         checkpoint:    Checkpoint instance for logging.
-        worktree_path: Absolute path to the worktree directory (for rebase).
         issue_number:  Original issue number (for logging).
+        worktree_path: Absolute path to the worktree directory (for rebase).
+                       If empty, rebase on conflict is skipped and the PR is
+                       escalated to human review instead.
         max_polls:     Maximum number of CI status polls before timeout.
         poll_interval: Seconds to sleep between polls.
 
@@ -2053,6 +2409,21 @@ def _monitor_pr(
         elif ci_status == "fail":
             # Check if it's a conflict
             if _is_conflict_failure(repo, pr_number):
+                if not worktree_path:
+                    # No worktree available (e.g. research PRs) — can't rebase
+                    logger.log_conductor_event(
+                        run_id=checkpoint.run_id,
+                        phase="ci_check",
+                        event_type="human_escalate",
+                        payload={
+                            "pr_number": pr_number,
+                            "issue_number": issue_number,
+                            "reason": "conflict detected but no worktree for rebase",
+                        },
+                        log_dir=config.log_dir.expanduser(),
+                    )
+                    return False
+
                 if rebase_attempts >= _REBASE_RETRY_LIMIT:
                     logger.log_conductor_event(
                         run_id=checkpoint.run_id,
@@ -2128,19 +2499,16 @@ def _triage_review_comments(
     checkpoint: Checkpoint,
     issue_number: int,
 ) -> None:
-    """Read review inline comments and log them for human review.
+    """Dispatch a fix agent to address review comments on a PR.
 
-    Triaging policy:
-    - Straightforward in-scope fixes → apply via runner.run()
+    Triaging policy (applied by the fix agent):
+    - Straightforward in-scope fixes → apply and push
     - Valid but out-of-scope → file a follow-up issue
     - False positives → add a skip comment on the PR
 
-    In this implementation, all comments are logged and a PR comment is added
-    acknowledging receipt. The orchestrator proceeds with merge regardless.
-
     Args:
         pr_number:    GitHub PR number.
-        branch:       Branch name (unused but kept for context).
+        branch:       Branch name for the PR.
         repo:         Repository in ``owner/repo`` format.
         config:       Config instance.
         checkpoint:   Checkpoint instance.
@@ -2163,7 +2531,14 @@ def _triage_review_comments(
     if not comments:
         return
 
-    # Log that we saw review comments
+    # Format review comments for the fix agent
+    comments_text = ""
+    for c in comments[:20]:  # cap to avoid huge prompts
+        path = c.get("path") or "?"
+        line = c.get("line") or c.get("original_line") or "?"
+        body = c.get("body") or ""
+        comments_text += f"- File: `{path}`, line {line}\n  {body}\n\n"
+
     logger.log_conductor_event(
         run_id=checkpoint.run_id,
         phase="review",
@@ -2172,26 +2547,39 @@ def _triage_review_comments(
             "pr_number": pr_number,
             "issue_number": issue_number,
             "comment_count": len(comments),
-            "action": "logged_for_human_review",
+            "action": "dispatching_fix_agent",
         },
         log_dir=config.log_dir.expanduser(),
     )
 
-    # Add a PR comment acknowledging the review
-    _gh(
-        [
-            "pr",
-            "comment",
-            str(pr_number),
-            "--body",
-            (
-                f"Orchestrator: received {len(comments)} review comment(s). "
-                "Review feedback logged; proceeding with merge if CI passes. "
-                "Non-trivial changes will be filed as follow-up issues."
-            ),
-        ],
-        repo=repo,
-        check=False,
+    prompt = (
+        f"You are addressing review comments on PR #{pr_number} in repository `{repo}`.\n"
+        f"Branch: `{branch}`\n\n"
+        f"Review comments to triage:\n\n"
+        f"{comments_text}\n"
+        f"Steps:\n"
+        f"1. Clone the repo into a temp directory:\n"
+        f"   WORK=$(mktemp -d) && gh repo clone {repo} $WORK\n"
+        f"2. cd $WORK && git checkout {branch} && git pull origin {branch}\n"
+        f"3. For each review comment, choose one action:\n"
+        f"   a. Fix it — make the change in the file, then commit and push\n"
+        f"   b. Out of scope — `gh issue create --repo {repo} --title '...' --body '...'`\n"
+        f"   c. False positive — `gh pr comment {pr_number} --repo {repo}"
+        f" --body 'Skipping: <reason>'`\n"
+        f"4. If you made changes:\n"
+        f"   git add -A && git commit -m 'fix: address review on PR #{pr_number}' && git push\n"
+        f"5. STOP.\n"
+    )
+
+    env = build_subprocess_env(config)
+    runner.run(
+        prompt=prompt,
+        allowed_tools=["Bash"],
+        env=env,
+        max_turns=30,
+        timeout_seconds=config.agent_timeout_minutes * 60,
+        model=config.model,
+        prefix=f"[fix-review #{pr_number}] ",
     )
 
 
@@ -2265,6 +2653,88 @@ def _get_repo_root() -> str:
     return os.getcwd()
 
 
+def _dispatch_design_agent(
+    issue: dict[str, Any],
+    branch: str,
+    worktree_path: str,
+    skill_name: str,
+    module_name: str | None,
+    repo: str,
+    milestone: str,
+    config: Config,
+    checkpoint: Checkpoint,
+) -> runner.RunResult:
+    """Dispatch a single design agent (HLD or LLD) in its worktree.
+
+    Builds the design-agent prompt, calls runner.run(), and returns the RunResult.
+    Designed to be called from a ThreadPoolExecutor worker for LLD agents.
+
+    Args:
+        issue:        Issue dict with number, title, body.
+        branch:       Branch name for the agent.
+        worktree_path: Absolute path to the agent's worktree.
+        skill_name:   ``"design-worker-hld"`` or ``"design-worker-lld"``.
+        module_name:  Module name for LLD agents; ``None`` for HLD.
+        repo:         Repository in ``owner/repo`` format.
+        milestone:    Active milestone name.
+        config:       Config instance.
+        checkpoint:   Checkpoint instance (read-only in thread).
+
+    Returns:
+        RunResult from runner.run().
+    """
+    issue_number = issue["number"]
+    today = date.today().isoformat()
+
+    if module_name:
+        prompt = (
+            f"## Session Parameters\n"
+            f"- Repository: {repo}\n"
+            f"- Milestone: {milestone}\n"
+            f"- Module: {module_name}\n"
+            f"- Issue: #{issue_number}\n"
+            f"- Branch: {branch}\n"
+            f"- Session Date: {today}\n\n"
+            f"You are the design-worker LLD agent for module `{module_name}` in `{repo}`.\n"
+            f"Write the Low-Level Design document for this module following the skill "
+            f"instructions in your system prompt."
+        )
+        prefix = f"[design-lld/{module_name}] "
+    else:
+        prompt = (
+            f"## Session Parameters\n"
+            f"- Repository: {repo}\n"
+            f"- Milestone: {milestone}\n"
+            f"- Issue: #{issue_number}\n"
+            f"- Branch: {branch}\n"
+            f"- Session Date: {today}\n\n"
+            f"You are the design-worker HLD agent for `{repo}`.\n"
+            f"Write the High-Level Design document for milestone `{milestone}` "
+            f"following the skill instructions in your system prompt."
+        )
+        prefix = f"[design-hld #{issue_number}] "
+
+    skill_tmp = write_skill_tmp(skill_name)
+    env = build_subprocess_env(config)
+    env["CLAUDE_CONFIG_DIR"] = f"/tmp/brimstone-agent-{issue_number}-{uuid.uuid4().hex}"
+
+    try:
+        result = runner.run(
+            prompt=prompt,
+            allowed_tools=["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+            append_system_prompt_file=skill_tmp,
+            env=env,
+            max_turns=200,
+            timeout_seconds=config.agent_timeout_minutes * 60,
+            model=config.model,
+            prefix=prefix,
+        )
+    finally:
+        skill_tmp.unlink(missing_ok=True)
+
+    return result
+
+
 def _dispatch_impl_agent(
     issue: dict[str, Any],
     branch: str,
@@ -2300,11 +2770,11 @@ def _dispatch_impl_agent(
 
     # Determine scope path from module name
     if module == "none":
-        scope = "src/composer/"
+        scope = "src/brimstone/"
     elif module == "cli":
-        scope = "src/composer/cli.py, src/composer/skills/"
+        scope = "src/brimstone/cli.py, src/brimstone/skills/"
     else:
-        scope = f"src/composer/{module}.py"
+        scope = f"src/brimstone/{module}.py"
 
     # Get the feat label to use for the PR
     feat_label = f"feat:{module}" if module != "none" else "feat:cli"
@@ -2331,10 +2801,11 @@ def _dispatch_impl_agent(
         f"13. STOP. Do not merge.\n\n"
         f"Issue body:\n{body}"
     )
-    prompt = inject_skill("impl-worker", base_prompt)
+    skill_tmp = write_skill_tmp("impl-worker")
 
     if dry_run:
-        from composer.runner import RunResult as _RunResult
+        skill_tmp.unlink(missing_ok=True)
+        from brimstone.runner import RunResult as _RunResult
 
         return (
             issue,
@@ -2359,20 +2830,25 @@ def _dispatch_impl_agent(
     # Build isolated env for the impl agent
     env = build_subprocess_env(config)
     # Each impl agent gets an isolated CLAUDE_CONFIG_DIR
-    env["CLAUDE_CONFIG_DIR"] = f"/tmp/composer-agent-{issue_number}-{uuid.uuid4().hex}"
+    env["CLAUDE_CONFIG_DIR"] = f"/tmp/brimstone-agent-{issue_number}-{uuid.uuid4().hex}"
 
     max_turns = 100
     if hasattr(config, "max_turns") and config.max_turns:
         max_turns = config.max_turns
 
-    result = runner.run(
-        prompt=prompt,
-        allowed_tools=runner.TOOLS_IMPL_AGENT,
-        env=env,
-        max_turns=max_turns,
-        timeout_seconds=config.agent_timeout_minutes * 60,
-        model=config.model,
-    )
+    try:
+        result = runner.run(
+            prompt=base_prompt,
+            allowed_tools=runner.TOOLS_IMPL_AGENT,
+            append_system_prompt_file=skill_tmp,
+            env=env,
+            max_turns=max_turns,
+            timeout_seconds=config.agent_timeout_minutes * 60,
+            model=config.model,
+            prefix=f"[impl-worker #{issue_number}] ",
+        )
+    finally:
+        skill_tmp.unlink(missing_ok=True)
     return issue, branch, worktree_path, result
 
 
@@ -2764,41 +3240,44 @@ def _run_design_worker(
     checkpoint: Checkpoint,
     dry_run: bool = False,
 ) -> None:
-    """Dispatch a single design-worker agent to produce HLD and LLD docs.
+    """Run the two-phase design-worker: HLD first, then LLD agents in parallel.
 
-    Builds a prompt by injecting the ``design-worker`` skill file and
-    invoking ``runner.run()`` once. The agent is responsible for reading
-    research docs, producing design documents, filing the next pipeline
-    issue, and posting a Notion report.
+    Phase 1 — HLD (sequential):
+      Gate 1: all research issues for the milestone must be closed.
+      Dispatches a single HLD agent to write ``docs/design/HLD.md``.
+      The HLD agent also files ``Design: LLD for <module>`` issues.
+
+    Phase 2 — LLDs (parallel):
+      Gate 2: ``docs/design/HLD.md`` must exist on the default branch.
+      Dispatches one LLD agent per open ``stage/design`` LLD issue in parallel.
+
+    Both phases are idempotent: docs already merged on the default branch are
+    skipped so re-running after an interruption resumes from where it left off.
 
     Args:
         repo:       GitHub repository in ``owner/repo`` format.
         milestone:  Active milestone name.
         config:     Validated Config instance.
         checkpoint: Active Checkpoint instance.
-        dry_run:    If True, print the prompt length without executing.
+        dry_run:    If True, print planned actions without executing.
     """
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
-    today = date.today().isoformat()
 
-    base_prompt = (
-        f"## Session Parameters\n"
-        f"- Repository: {repo}\n"
-        f"- Milestone: {milestone}\n"
-        f"- Session Date: {today}\n\n"
-        f"You are the design-worker for the `{repo}` repository.\n"
-        f"Translate the completed research docs for milestone `{milestone}` "
-        f"into HLD and LLD design documents following the skill instructions below."
-    )
-    prompt = inject_skill("design-worker", base_prompt)
+    # ------------------------------------------------------------------ #
+    # Gate 1: All research must be closed before design begins            #
+    # ------------------------------------------------------------------ #
+    if not dry_run:
+        open_research = _count_all_open_research_issues(repo, milestone)
+        if open_research > 0:
+            click.echo(
+                f"Error: {open_research} research issue(s) still open for milestone "
+                f"'{milestone}'. All research must complete before design can begin.",
+                err=True,
+            )
+            raise SystemExit(1)
 
-    if dry_run:
-        click.echo(
-            f"[dry-run] Would dispatch design-worker agent for milestone "
-            f"{milestone!r} in repo {repo!r}"
-        )
-        click.echo(f"[dry-run] Prompt length: {len(prompt)} chars")
-        return
+        default_branch = _get_default_branch_for_repo(repo)
+        repo_root = _get_repo_root()
 
     logger.log_conductor_event(
         run_id=checkpoint.run_id,
@@ -2808,38 +3287,256 @@ def _run_design_worker(
         log_dir=config.log_dir.expanduser(),
     )
 
-    env = build_subprocess_env(config)
-    result = runner.run(
-        prompt=prompt,
-        allowed_tools=["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
-        env=env,
-        max_turns=200,
-        timeout_seconds=config.agent_timeout_minutes * 60,
-        model=config.model,
-    )
+    # ------------------------------------------------------------------ #
+    # Phase 1: HLD                                                        #
+    # ------------------------------------------------------------------ #
+    hld_doc_path = f"docs/design/{milestone}/HLD.md"
+    hld_issue_title = f"Design: HLD for {milestone}"
+
+    if dry_run:
+        click.echo(
+            f"[dry-run] Would dispatch HLD agent for milestone {milestone!r} in repo {repo!r}"
+        )
+    elif _doc_exists_on_default_branch(repo, hld_doc_path, default_branch):
+        click.echo("HLD already merged — skipping Phase 1")
+    else:
+        # Find the HLD issue (may have been filed by completion gate or on a previous run)
+        design_issues = _list_open_design_issues(repo, milestone)
+        hld_issue = next((i for i in design_issues if i["title"] == hld_issue_title), None)
+        if hld_issue is None:
+            # Missing — create it (idempotent) and re-fetch
+            _file_design_issue_if_missing(
+                repo,
+                milestone,
+                hld_issue_title,
+                (
+                    "## Deliverable\n"
+                    f"`docs/design/{milestone}/HLD.md`\n\n"
+                    "## Instructions\n"
+                    f"Read all merged research docs in `docs/research/{milestone}/`. "
+                    "Write the HLD. "
+                    "For each module identified, file a `Design: LLD for <module>` "
+                    "issue with label `stage/design` and this milestone. "
+                    "Check for duplicates before filing."
+                ),
+            )
+            design_issues = _list_open_design_issues(repo, milestone)
+            hld_issue = next((i for i in design_issues if i["title"] == hld_issue_title), None)
+
+        if hld_issue is None:
+            click.echo("Error: Could not find or create HLD design issue.", err=True)
+            raise SystemExit(1)
+
+        hld_number = hld_issue["number"]
+        hld_branch = f"{hld_number}-{_slugify(hld_issue_title)}"
+
+        _claim_issue(repo=repo, issue_number=hld_number)
+        worktree_path = _create_worktree(hld_branch, repo_root)
+        if worktree_path is None:
+            _unclaim_issue(repo=repo, issue_number=hld_number)
+            click.echo(f"Error: Failed to create worktree for branch {hld_branch!r}.", err=True)
+            raise SystemExit(1)
+
+        logger.log_conductor_event(
+            run_id=checkpoint.run_id,
+            phase="dispatch",
+            event_type="design_hld_dispatch",
+            payload={"issue_number": hld_number, "branch": hld_branch},
+            log_dir=config.log_dir.expanduser(),
+        )
+
+        hld_result = _dispatch_design_agent(
+            issue=hld_issue,
+            branch=hld_branch,
+            worktree_path=worktree_path,
+            skill_name="design-worker-hld",
+            module_name=None,
+            repo=repo,
+            milestone=milestone,
+            config=config,
+            checkpoint=checkpoint,
+        )
+
+        if hld_result.is_error:
+            _unclaim_issue(repo=repo, issue_number=hld_number)
+            _remove_worktree(worktree_path, repo_root)
+            click.echo(
+                f"HLD agent failed: {hld_result.subtype} / {hld_result.error_code}",
+                err=True,
+            )
+            raise SystemExit(1)
+
+        pr_number = _find_pr_for_branch(repo, hld_branch)
+        if pr_number is None:
+            _unclaim_issue(repo=repo, issue_number=hld_number)
+            _remove_worktree(worktree_path, repo_root)
+            click.echo("Error: HLD agent completed but no PR found.", err=True)
+            raise SystemExit(1)
+
+        merged = _monitor_pr(
+            pr_number=pr_number,
+            branch=hld_branch,
+            repo=repo,
+            config=config,
+            checkpoint=checkpoint,
+            worktree_path=worktree_path,
+            issue_number=hld_number,
+        )
+        _remove_worktree(worktree_path, repo_root)
+        if not merged:
+            click.echo(
+                f"Error: HLD PR #{pr_number} did not merge. Manual intervention required.",
+                err=True,
+            )
+            raise SystemExit(1)
+
+        click.echo(f"HLD merged (PR #{pr_number}).")
+        session.save(checkpoint, checkpoint_path)
+
+    # ------------------------------------------------------------------ #
+    # Gate 2: HLD must be on the default branch before LLD dispatch       #
+    # ------------------------------------------------------------------ #
+    if not dry_run and not _doc_exists_on_default_branch(repo, hld_doc_path, default_branch):
+        click.echo(
+            f"Error: {hld_doc_path!r} not found on branch {default_branch!r}. "
+            "Phase 1 must complete before LLD agents can be dispatched.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    # ------------------------------------------------------------------ #
+    # Phase 2: LLDs (parallel)                                           #
+    # ------------------------------------------------------------------ #
+    if dry_run:
+        click.echo(f"[dry-run] Would dispatch LLD agents in parallel for milestone {milestone!r}")
+        return
+
+    # LLD issues were filed by the HLD agent; pick up all open ones
+    all_design_issues = _list_open_design_issues(repo, milestone)
+    lld_issues = [i for i in all_design_issues if i["title"] != hld_issue_title]
+
+    if not lld_issues:
+        click.echo(
+            "No open LLD design issues found. "
+            "The HLD agent should have filed them. "
+            "Check the HLD doc and file 'Design: LLD for <module>' issues manually.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    # Recovery: skip modules whose docs already exist on the default branch
+    pending: list[tuple[str, dict[str, Any]]] = []
+    for issue in lld_issues:
+        module = _extract_module_from_design_issue(issue)
+        lld_path = f"docs/design/{milestone}/lld/{module}.md"
+        if _doc_exists_on_default_branch(repo, lld_path, default_branch):
+            click.echo(f"LLD for {module!r} already merged — skipping")
+            _gh(["issue", "close", str(issue["number"])], repo=repo, check=False)
+        else:
+            pending.append((module, issue))
+
+    if not pending:
+        click.echo("All LLD docs already merged — Phase 2 complete.")
+    else:
+        logger.log_conductor_event(
+            run_id=checkpoint.run_id,
+            phase="dispatch",
+            event_type="design_lld_dispatch",
+            payload={"milestone": milestone, "count": len(pending)},
+            log_dir=config.log_dir.expanduser(),
+        )
+
+        # Claim issues and create worktrees sequentially, then dispatch in parallel
+        dispatch_batch: list[tuple[str, dict[str, Any], str, str]] = []
+        for module, issue in pending:
+            issue_number = issue["number"]
+            branch = f"{issue_number}-{_slugify(issue['title'])}"
+            _claim_issue(repo=repo, issue_number=issue_number)
+            worktree_path = _create_worktree(branch, repo_root)
+            if worktree_path is None:
+                _unclaim_issue(repo=repo, issue_number=issue_number)
+                click.echo(
+                    f"Warning: Failed to create worktree for {branch!r} — skipping LLD "
+                    f"for {module!r}",
+                    err=True,
+                )
+                continue
+            dispatch_batch.append((module, issue, branch, worktree_path))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(dispatch_batch)) as executor:
+            futures: dict = {
+                executor.submit(
+                    _dispatch_design_agent,
+                    issue=issue,
+                    branch=branch,
+                    worktree_path=wt,
+                    skill_name="design-worker-lld",
+                    module_name=module,
+                    repo=repo,
+                    milestone=milestone,
+                    config=config,
+                    checkpoint=checkpoint,
+                ): (module, issue, branch, wt)
+                for module, issue, branch, wt in dispatch_batch
+            }
+
+            for future in concurrent.futures.as_completed(futures):
+                module, issue, branch, wt = futures[future]
+                issue_number = issue["number"]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    click.echo(f"LLD agent for {module!r} raised exception: {exc}", err=True)
+                    _unclaim_issue(repo=repo, issue_number=issue_number)
+                    _remove_worktree(wt, repo_root)
+                    continue
+
+                if result.is_error:
+                    click.echo(f"LLD agent for {module!r} failed: {result.subtype}", err=True)
+                    _unclaim_issue(repo=repo, issue_number=issue_number)
+                    _remove_worktree(wt, repo_root)
+                    continue
+
+                pr_number = _find_pr_for_branch(repo, branch)
+                if pr_number is None:
+                    click.echo(f"LLD agent for {module!r} succeeded but no PR found.", err=True)
+                    _unclaim_issue(repo=repo, issue_number=issue_number)
+                    _remove_worktree(wt, repo_root)
+                    continue
+
+                merged = _monitor_pr(
+                    pr_number=pr_number,
+                    branch=branch,
+                    repo=repo,
+                    config=config,
+                    checkpoint=checkpoint,
+                    worktree_path=wt,
+                    issue_number=issue_number,
+                )
+                _remove_worktree(wt, repo_root)
+                if merged:
+                    click.echo(f"LLD for {module!r} merged (PR #{pr_number}).")
+                else:
+                    click.echo(
+                        f"Warning: LLD PR #{pr_number} for {module!r} did not merge. "
+                        "Manual intervention required.",
+                        err=True,
+                    )
+
+    # ------------------------------------------------------------------ #
+    # Complete: file plan-issues pipeline issue                           #
+    # ------------------------------------------------------------------ #
+    _file_pipeline_issue(repo=repo, next_worker="plan-issues", milestone=milestone)
+    session.save(checkpoint, checkpoint_path)
 
     logger.log_conductor_event(
         run_id=checkpoint.run_id,
-        phase="dispatch",
+        phase="complete",
         event_type="design_worker_complete",
-        payload={
-            "repo": repo,
-            "milestone": milestone,
-            "subtype": result.subtype,
-            "is_error": result.is_error,
-            "error_code": result.error_code,
-        },
+        payload={"repo": repo, "milestone": milestone},
         log_dir=config.log_dir.expanduser(),
     )
-    session.save(checkpoint, checkpoint_path)
-
-    if result.is_error:
-        click.echo(
-            f"Design-worker completed with error: {result.subtype} / {result.error_code}",
-            err=True,
-        )
-    else:
-        click.echo(f"Design-worker complete for milestone '{milestone}'.")
+    click.echo(f"Design-worker complete for milestone '{milestone}'.")
 
 
 # ---------------------------------------------------------------------------
@@ -2879,7 +3576,7 @@ def _run_plan_issues(
         f"- Dry Run: {dry_run}\n\n"
         f"You are the plan-issues orchestrator for the `{repo}` repository.\n"
         f"Read the HLD and LLD design docs and file fully-specified `stage/impl` issues "
-        f"against milestone `{milestone}` following the skill instructions below.\n"
+        f"against milestone `{milestone}` following the skill instructions.\n"
         + (
             "\nThe `--dry-run` flag is set: print all planned issues but do NOT call "
             "`gh issue create`.\n"
@@ -2887,14 +3584,14 @@ def _run_plan_issues(
             else ""
         )
     )
-    prompt = inject_skill("plan-issues", base_prompt)
+    skill_tmp = write_skill_tmp("plan-issues")
 
     if dry_run:
+        skill_tmp.unlink(missing_ok=True)
         click.echo(
             f"[dry-run] Would dispatch plan-issues agent for milestone "
             f"{milestone!r} in repo {repo!r}"
         )
-        click.echo(f"[dry-run] Prompt length: {len(prompt)} chars")
         return
 
     logger.log_conductor_event(
@@ -2906,14 +3603,19 @@ def _run_plan_issues(
     )
 
     env = build_subprocess_env(config)
-    result = runner.run(
-        prompt=prompt,
-        allowed_tools=["Bash", "Read", "Glob", "Grep"],
-        env=env,
-        max_turns=200,
-        timeout_seconds=config.agent_timeout_minutes * 60,
-        model=config.model,
-    )
+    try:
+        result = runner.run(
+            prompt=base_prompt,
+            allowed_tools=["Bash", "Read", "Glob", "Grep"],
+            append_system_prompt_file=skill_tmp,
+            env=env,
+            max_turns=200,
+            timeout_seconds=config.agent_timeout_minutes * 60,
+            model=config.model,
+            prefix="[plan-issues] ",
+        )
+    finally:
+        skill_tmp.unlink(missing_ok=True)
 
     logger.log_conductor_event(
         run_id=checkpoint.run_id,
@@ -3020,6 +3722,234 @@ def _seed_spec(
         text=True,
     )
     click.echo(f"Seeded spec into {dest_file} and committed.")
+
+
+_BRIMSTONE_BOT = "yeast-bot"
+
+_CI_WORKFLOW_TEMPLATE = """\
+name: CI
+
+on:
+  push:
+    branches: ["{branch}"]
+  pull_request:
+    branches: ["{branch}"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Run tests
+        run: uv run pytest
+      - name: Lint
+        run: uv run ruff check
+"""
+
+
+def _accept_brimstone_bot_invitation(repo: str) -> None:
+    """Accept the pending collaborator invitation for *repo* as ``yeast-bot``.
+
+    Reads ``GITHUB_TOKEN`` from the environment (loaded from ``.env`` by
+    pydantic-settings) and calls the GitHub Invitations API as the bot user.
+    Non-fatal: prints a warning if the token is absent or the call fails.
+
+    Args:
+        repo: GitHub repository in ``owner/repo`` format.
+    """
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        click.echo(
+            f"Warning: GITHUB_TOKEN not set; cannot auto-accept invitation for {repo}",
+            err=True,
+        )
+        return
+
+    # Find the pending invitation for this repo
+    list_result = subprocess.run(
+        [
+            "curl",
+            "-s",
+            "-H",
+            f"Authorization: token {token}",
+            "https://api.github.com/user/repository_invitations",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if list_result.returncode != 0:
+        click.echo(f"Warning: could not list invitations for {_BRIMSTONE_BOT}", err=True)
+        return
+
+    try:
+        invitations = json.loads(list_result.stdout)
+    except json.JSONDecodeError:
+        return
+
+    invitation_id: int | None = None
+    for inv in invitations:
+        if inv.get("repository", {}).get("full_name", "") == repo:
+            invitation_id = inv["id"]
+            break
+
+    if invitation_id is None:
+        return  # No pending invitation — already accepted or not yet sent
+
+    accept_result = subprocess.run(
+        [
+            "curl",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-X",
+            "PATCH",
+            "-H",
+            f"Authorization: token {token}",
+            f"https://api.github.com/user/repository_invitations/{invitation_id}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    http_code = accept_result.stdout.strip()
+    if http_code == "204":
+        click.echo(f"{_BRIMSTONE_BOT} accepted invitation to {repo}")
+    else:
+        click.echo(
+            f"Warning: invitation accept returned HTTP {http_code} for {repo}",
+            err=True,
+        )
+
+
+def _add_brimstone_bot_collaborator(repo: str) -> None:
+    """Add the brimstone service account as a collaborator on *repo* and auto-accept.
+
+    Uses the GitHub Collaborators API to grant push access to
+    ``yeast-bot``, then immediately accepts the invitation using the bot's
+    token from ``GITHUB_TOKEN`` in the environment.  Non-fatal so init can
+    proceed even if permissions are missing.
+
+    Args:
+        repo: GitHub repository in ``owner/repo`` format.
+    """
+    endpoint = f"repos/{repo}/collaborators/{_BRIMSTONE_BOT}"
+    result = _gh(["api", endpoint, "-X", "PUT", "-f", "permission=push"], check=False)
+    if result.returncode == 0:
+        click.echo(f"Added {_BRIMSTONE_BOT} as a collaborator on {repo}")
+        _accept_brimstone_bot_invitation(repo)
+    else:
+        click.echo(
+            f"Warning: could not add {_BRIMSTONE_BOT} to {repo} "
+            f"(HTTP status may indicate it already exists or lacks permission): "
+            f"{result.stderr.strip()}",
+            err=True,
+        )
+
+
+def _upload_spec_to_repo(repo: str, spec_path: Path, version: str) -> None:
+    """Create or update ``docs/specs/<version>.md`` in *repo* via the GitHub Contents API.
+
+    Uses ``gh api`` with a PUT request on the default branch.  If the file
+    already exists its SHA is fetched first so the update is accepted by GitHub.
+
+    Args:
+        repo:      GitHub repository in ``owner/repo`` format.
+        spec_path: Local path to the spec markdown file.
+        version:   Version identifier used to build the remote filename stem.
+
+    Raises:
+        click.ClickException: If the API call fails.
+    """
+    import base64
+
+    content = spec_path.read_bytes()
+    encoded = base64.b64encode(content).decode()
+    remote_path = f"docs/specs/{version}.md"
+    message = f"docs: seed spec {version}"
+
+    # Fetch existing file SHA if the file already exists (needed for updates)
+    check = _gh(["api", f"repos/{repo}/contents/{remote_path}"], check=False)
+    sha: str | None = None
+    if check.returncode == 0:
+        try:
+            sha = json.loads(check.stdout).get("sha")
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    payload: dict = {"message": message, "content": encoded}
+    if sha:
+        payload["sha"] = sha
+
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repo}/contents/{remote_path}", "-X", "PUT", "--input", "-"],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise click.ClickException(
+            f"Failed to upload spec to {repo}/{remote_path}: {result.stderr.strip()}"
+        )
+    click.echo(f"Uploaded spec to {repo}/{remote_path}")
+
+
+def _setup_ci(repo: str, config: "Config", dry_run: bool) -> None:
+    """Push a default CI workflow and inject ANTHROPIC_API_KEY as a GitHub Actions secret.
+
+    Non-fatal: emits warnings on failure so ``init`` can continue.
+
+    Args:
+        repo:    GitHub repository in ``owner/repo`` format.
+        config:  Validated Config instance (provides default_branch and anthropic_api_key).
+        dry_run: If True, print what would happen without executing.
+    """
+    import base64
+
+    workflow_path = ".github/workflows/ci.yml"
+    branch = config.default_branch
+    workflow_content = _CI_WORKFLOW_TEMPLATE.format(branch=branch)
+
+    if dry_run:
+        click.echo(f"[dry-run] would push {workflow_path} to {repo}")
+        click.echo(f"[dry-run] would set ANTHROPIC_API_KEY secret on {repo}")
+        return
+
+    # Check if workflow already exists
+    check = _gh(["api", f"repos/{repo}/contents/{workflow_path}"], check=False)
+    if check.returncode == 0:
+        click.echo(f"CI workflow already exists in {repo}, skipping upload")
+    else:
+        encoded = base64.b64encode(workflow_content.encode()).decode()
+        payload: dict = {"message": "ci: add default CI workflow", "content": encoded}
+        result = subprocess.run(
+            ["gh", "api", f"repos/{repo}/contents/{workflow_path}", "-X", "PUT", "--input", "-"],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            click.echo(
+                f"Warning: could not push CI workflow to {repo}: {result.stderr.strip()}",
+                err=True,
+            )
+        else:
+            click.echo(f"Pushed CI workflow to {repo}/{workflow_path}")
+
+    # Inject ANTHROPIC_API_KEY as a GitHub Actions secret
+    result = subprocess.run(
+        ["gh", "secret", "set", "ANTHROPIC_API_KEY", "--repo", repo, "--body", config.anthropic_api_key],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        click.echo(
+            f"Warning: could not set ANTHROPIC_API_KEY secret on {repo}: {result.stderr.strip()}",
+            err=True,
+        )
+    else:
+        click.echo(f"Set ANTHROPIC_API_KEY secret on {repo}")
 
 
 def _run_initialize(
@@ -3184,10 +4114,11 @@ def _run_plan_milestones(
         f"You are running in a headless temp directory (not inside the repo checkout).\n"
         f"{spec_read_instruction}\n"
         f"Then create the milestone and file research issues"
-        f" following the skill instructions below."
+        f" following the skill instructions in your system prompt."
         f"{dry_run_instruction}"
     )
-    prompt = inject_skill("plan-milestones", base_prompt)
+
+    skill_tmp = write_skill_tmp("plan-milestones")
 
     if dry_run:
         click.echo(
@@ -3205,64 +4136,19 @@ def _run_plan_milestones(
 
     env = build_subprocess_env(config)
 
-    if dry_run:
-        # Confirm claude is reachable, then run a minimal probe to check that
-        # --output-format stream-json works with our flags.
-        _ver = subprocess.run(["claude", "--version"], capture_output=True, text=True, env=env)
-        if _ver.returncode != 0 or not _ver.stdout.strip():
-            click.echo(
-                f"Warning: 'claude --version' failed "
-                f"(rc={_ver.returncode}, stdout={_ver.stdout!r}, stderr={_ver.stderr!r})",
-                err=True,
-            )
-        else:
-            click.echo(f"  claude version: {_ver.stdout.strip()}", err=True)
-
-        # Minimal stream-json probe — same flags as the real invocation but
-        # with a trivial 1-turn prompt so we can see if any events come back.
-        _probe_cmd = [
-            "claude",
-            "-p",
-            "Reply with the single word: OK",
-            "--output-format",
-            "stream-json",
-            "--allowedTools",
-            "Bash",
-            "--max-turns",
-            "1",
-            "--dangerously-skip-permissions",
-            "--disable-slash-commands",
-            "--no-session-persistence",
-            "--strict-mcp-config",
-            "--mcp-config",
-            "{}",
-        ]
-        _probe = subprocess.run(
-            _probe_cmd,
-            capture_output=True,
-            text=True,
+    try:
+        result = runner.run(
+            prompt=base_prompt,
+            allowed_tools=["Bash"],
+            append_system_prompt_file=skill_tmp,
             env=env,
-            cwd=tempfile.gettempdir(),
+            max_turns=200,
+            timeout_seconds=config.agent_timeout_minutes * 60,
+            model=config.model,
+            prefix="[plan-milestones] ",
         )
-        click.echo(
-            f"  probe rc={_probe.returncode} "
-            f"stdout_bytes={len(_probe.stdout)} "
-            f"stderr_bytes={len(_probe.stderr)}",
-            err=True,
-        )
-        if _probe.stdout:
-            click.echo(f"  probe stdout (first 500): {_probe.stdout[:500]!r}", err=True)
-        if _probe.stderr:
-            click.echo(f"  probe stderr (first 500): {_probe.stderr[:500]!r}", err=True)
-
-    result = runner.run(
-        prompt=prompt,
-        allowed_tools=["Bash", "Read", "Glob", "Grep"],
-        env=env,
-        max_turns=200,
-        timeout_seconds=config.agent_timeout_minutes * 60,
-        model=config.model,
-    )
+    finally:
+        skill_tmp.unlink(missing_ok=True)
 
     logger.log_conductor_event(
         run_id=checkpoint.run_id,
@@ -3275,6 +4161,7 @@ def _run_plan_milestones(
             "is_error": result.is_error,
             "error_code": result.error_code,
             "exit_code": result.exit_code,
+            "num_events": result.num_events,
             "stderr": result.stderr[:2000] if result.stderr else "",
             "dry_run": dry_run,
         },
@@ -3292,8 +4179,8 @@ def _run_plan_milestones(
         raise SystemExit(1)
     elif result.subtype == "missing_result_event":
         click.echo(
-            f"Warning: agent subprocess exited without producing any output "
-            f"(exit_code={result.exit_code}, no stream-json events).",
+            f"Warning: agent subprocess exited without producing a result event "
+            f"(exit_code={result.exit_code}, num_events={result.num_events}).",
             err=True,
         )
         if result.stderr:
@@ -3330,303 +4217,6 @@ def _run_plan_milestones(
 @click.group()
 def composer() -> None:
     """Composer orchestrator — run pipeline workers and admin commands."""
-
-
-@composer.command("impl-worker")
-@click.option(
-    "--repo",
-    default=None,
-    help=(
-        "Target repository. Accepts: 'owner/name' (existing remote), "
-        "'name' (new private repo to scaffold), 'path/to/local/dir' (local git repo), "
-        "or omit to operate on the current working directory."
-    ),
-)
-@click.option("--milestone", default=None, help="Milestone name to process")
-@click.option("--model", default=None, help="Override Claude model")
-@click.option("--max-budget", type=float, default=None, help="USD budget cap")
-@click.option("--max-turns", type=int, default=None, help="Max turns per invocation")
-@click.option("--dry-run", is_flag=True, help="Print invocation without executing")
-@click.option("--resume", default=None, help="Resume a previous session by ID")
-def impl_worker(
-    repo: str | None,
-    milestone: str | None,
-    model: str | None,
-    max_budget: float | None,
-    max_turns: int | None,
-    dry_run: bool,
-    resume: str | None,
-) -> None:
-    """Process implementation issues headlessly via claude -p."""
-    repo_ref, _local_path = _resolve_repo(repo)
-    overrides: dict = {"github_repo": repo_ref or None, "target_repo": repo_ref or None}
-    if model:
-        overrides["model"] = model
-    if max_budget is not None:
-        overrides["max_budget_usd"] = max_budget
-    if max_turns is not None:
-        overrides["max_turns"] = max_turns
-
-    config = load_config(**overrides)
-    checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
-
-    _config, _checkpoint = startup_sequence(
-        config=config,
-        checkpoint_path=checkpoint_path,
-        milestone=milestone or "",
-        stage="impl",
-        resume_run_id=resume,
-    )
-
-    _run_impl_worker(
-        repo=repo_ref,
-        milestone=milestone or "",
-        config=_config,
-        checkpoint=_checkpoint,
-        dry_run=dry_run,
-    )
-
-
-@composer.command("research-worker")
-@click.option(
-    "--repo",
-    default=None,
-    help=(
-        "Target repository. Accepts: 'owner/name' (existing remote), "
-        "'name' (new private repo to scaffold), 'path/to/local/dir' (local git repo), "
-        "or omit to operate on the current working directory."
-    ),
-)
-@click.option("--milestone", required=True, help="Milestone name to process")
-@click.option("--model", default=None, help="Override Claude model")
-@click.option("--max-budget", type=float, default=None, help="USD budget cap")
-@click.option("--max-turns", type=int, default=None, help="Max turns per invocation")
-@click.option("--dry-run", is_flag=True, help="Print invocation without executing")
-@click.option("--resume", default=None, help="Resume a previous session by ID")
-def research_worker(
-    repo: str | None,
-    milestone: str,
-    model: str | None,
-    max_budget: float | None,
-    max_turns: int | None,
-    dry_run: bool,
-    resume: str | None,
-) -> None:
-    """Process research issues for a milestone headlessly via claude -p."""
-    repo_ref, _local_path = _resolve_repo(repo)
-    overrides: dict = {"github_repo": repo_ref or None, "target_repo": repo_ref or None}
-    if model:
-        overrides["model"] = model
-    if max_budget is not None:
-        overrides["max_budget_usd"] = max_budget
-    if max_turns is not None:
-        overrides["max_turns"] = max_turns
-
-    config = load_config(**overrides)
-    checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
-
-    _config, _checkpoint = startup_sequence(
-        config=config,
-        checkpoint_path=checkpoint_path,
-        milestone=milestone,
-        stage="research",
-        resume_run_id=resume,
-    )
-
-    _run_research_worker(
-        repo=repo_ref,
-        milestone=milestone,
-        config=_config,
-        checkpoint=_checkpoint,
-        dry_run=dry_run,
-    )
-
-
-@composer.command("design-worker")
-@click.option(
-    "--repo",
-    default=None,
-    help=(
-        "Target repository. Accepts: 'owner/name' (existing remote), "
-        "'name' (new private repo to scaffold), 'path/to/local/dir' (local git repo), "
-        "or omit to operate on the current working directory."
-    ),
-)
-@click.option("--milestone", required=True, help="Milestone to translate research docs for")
-@click.option("--model", default=None, help="Override Claude model")
-@click.option("--dry-run", is_flag=True, help="Print planned issues without creating them")
-def design_worker(
-    repo: str | None,
-    milestone: str,
-    model: str | None,
-    dry_run: bool,
-) -> None:
-    """Translate research docs into HLD and LLD design documents via claude -p."""
-    repo_ref, _local_path = _resolve_repo(repo)
-    overrides: dict = {"github_repo": repo_ref or None, "target_repo": repo_ref or None}
-    if model:
-        overrides["model"] = model
-
-    config = load_config(**overrides)
-    checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
-
-    _config, _checkpoint = startup_sequence(
-        config=config,
-        checkpoint_path=checkpoint_path,
-        milestone=milestone,
-        stage="design",
-    )
-
-    _run_design_worker(
-        repo=repo_ref,
-        milestone=milestone,
-        config=_config,
-        checkpoint=_checkpoint,
-        dry_run=dry_run,
-    )
-
-
-@composer.command("plan-issues")
-@click.option(
-    "--repo",
-    default=None,
-    help=(
-        "Target repository. Accepts: 'owner/name' (existing remote), "
-        "'name' (new private repo to scaffold), 'path/to/local/dir' (local git repo), "
-        "or omit to operate on the current working directory."
-    ),
-)
-@click.option("--milestone", required=True, help="Milestone to file impl issues against")
-@click.option("--model", default=None, help="Override Claude model")
-@click.option("--dry-run", is_flag=True, help="Print planned milestones without creating them")
-def plan_issues(
-    repo: str | None,
-    milestone: str,
-    model: str | None,
-    dry_run: bool,
-) -> None:
-    """File stage/impl issues from HLD and LLD design docs via claude -p."""
-    repo_ref, _local_path = _resolve_repo(repo)
-    overrides: dict = {"github_repo": repo_ref or None, "target_repo": repo_ref or None}
-    if model:
-        overrides["model"] = model
-
-    config = load_config(**overrides)
-    checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
-
-    _config, _checkpoint = startup_sequence(
-        config=config,
-        checkpoint_path=checkpoint_path,
-        milestone=milestone,
-        stage="plan-issues",
-    )
-
-    _run_plan_issues(
-        repo=repo_ref,
-        milestone=milestone,
-        config=_config,
-        checkpoint=_checkpoint,
-        dry_run=dry_run,
-    )
-
-
-@composer.command("plan-milestones")
-@click.option(
-    "--repo",
-    default=None,
-    help=(
-        "Target repository. Accepts: 'owner/name' (existing remote), "
-        "'name' (new private repo to scaffold), 'path/to/local/dir' (local git repo), "
-        "or omit to operate on the current working directory."
-    ),
-)
-@click.option(
-    "--version",
-    default=None,
-    help=(
-        "Version name for the milestone (e.g. 'v1', 'MVP'). "
-        "Required unless --spec is given, in which case it defaults to the spec filename stem. "
-        "Tip: name your spec file v1.md, or pass --version v1 explicitly."
-    ),
-)
-@click.option("--model", default=None, help="Override Claude model")
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Run the planning agent and display the plan without creating anything on GitHub.",
-)
-@click.option(
-    "--spec",
-    type=click.Path(dir_okay=False),
-    default=None,
-    help=(
-        "Path to a .md spec file to seed into the target repo before running plan-milestones. "
-        "Accepts relative (resolved from cwd) or absolute paths."
-    ),
-)
-def plan_milestones(
-    repo: str | None,
-    version: str | None,
-    model: str | None,
-    dry_run: bool,
-    spec: str | None,
-) -> None:
-    """Create a milestone pair and seed research issues from a spec via claude -p."""
-    # Resolve and validate the spec path if provided
-    resolved_spec: Path | None = None
-    if spec is not None:
-        resolved_spec = _validate_spec_path(spec)
-
-    # Determine the version name: explicit flag > inferred from spec filename > error
-    if version is None:
-        if resolved_spec is not None:
-            version = resolved_spec.stem
-        else:
-            raise click.UsageError("--version is required when --spec is not provided.")
-
-    repo_ref, local_path = _resolve_repo(repo)
-    overrides: dict = {"github_repo": repo_ref or None, "target_repo": repo_ref or None}
-    if model:
-        overrides["model"] = model
-
-    config = load_config(**overrides)
-    checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
-
-    # plan-milestones targets a remote repo; the cwd need not be a git repo.
-    _HEADLESS_SKIP = frozenset(
-        {
-            "Git repo present",
-            "Default branch matches config",
-            "No stale in-progress issues",
-            "Open PRs needing attention",
-            "No active worktrees",
-        }
-    )
-    _config, _checkpoint = startup_sequence(
-        config=config,
-        checkpoint_path=checkpoint_path,
-        milestone=version,
-        stage="plan-milestones",
-        skip_checks=_HEADLESS_SKIP,
-    )
-
-    # Seed the spec into the target repo before running plan-milestones
-    if resolved_spec is not None:
-        if local_path is None:
-            raise click.ClickException(
-                "--spec requires a local repository path. "
-                "Pass --repo path/to/local/dir or omit --repo to operate on cwd."
-            )
-        _seed_spec(resolved_spec, version, local_path)
-
-    _run_plan_milestones(
-        repo=repo_ref,
-        version=version,
-        config=_config,
-        checkpoint=_checkpoint,
-        local_path=local_path,
-        dry_run=dry_run,
-    )
 
 
 @composer.command("health")
@@ -3677,151 +4267,48 @@ def cost() -> None:
 
 
 # ---------------------------------------------------------------------------
-# run — full pipeline orchestration
+# run / init / adopt — unified pipeline interface
 # ---------------------------------------------------------------------------
 
-# Valid stage names in pipeline order
-_PIPELINE_STAGES: list[str] = [
-    "initialize",
-    "plan-milestones",
-    "research-worker",
-    "design-worker",
-    "plan-issues",
-    "impl-worker",
-]
 
-
-def _run_pipeline_stage(
+def _check_gate_before_stage(
     stage: str,
-    repo_ref: str,
-    local_path: str | None,
-    version: str,
-    spec: str | None,
-    dry_run: bool,
+    stages_being_run: list[str],
+    repo: str,
+    milestone: str,
+    default_branch: str,
 ) -> None:
-    """Execute a single pipeline stage by calling the underlying _run_* helper.
+    """Abort with a clear error if a prerequisite stage has not been completed.
 
-    Builds a minimal Config and Checkpoint for the stage, then delegates to the
-    appropriate internal helper function.  Each stage is self-contained: it loads
-    its own config and checkpoint so that stages remain independent.
+    Gates are only applied when the prerequisite stage is NOT also being run in
+    the same invocation (e.g. ``--all`` skips both gates because research and
+    design are both included).
 
     Args:
-        stage:      One of the valid _PIPELINE_STAGES names.
-        repo_ref:   Resolved ``owner/name`` repository reference.
-        local_path: Absolute path to the local repo clone (or None for remote-only).
-        version:    Version identifier (e.g. ``"MVP"``).
-        spec:       Absolute path to a spec file to seed (initialize stage only, or None).
-        dry_run:    If True, print intent without executing.
+        stage:             Stage about to be executed.
+        stages_being_run:  All stages requested in this invocation.
+        repo:              GitHub repository in ``owner/repo`` format.
+        milestone:         Active milestone name.
+        default_branch:    Default branch of the remote repo.
 
     Raises:
-        click.ClickException: On configuration or stage-level failures.
+        click.ClickException: If the prerequisite is not satisfied.
     """
-    overrides: dict = {
-        "github_repo": repo_ref or None,
-        "target_repo": repo_ref or None,
-    }
-    # Auto-detect the target repo's default branch so the health check doesn't
-    # warn about a mismatch when the target uses a different branch name than
-    # the config default (e.g. "mainline" vs "main").
-    _branch_proc = subprocess.run(
-        ["git", "symbolic-ref", "--short", "HEAD"],
-        capture_output=True,
-        text=True,
-    )
-    if _branch_proc.returncode == 0 and _branch_proc.stdout.strip():
-        overrides["default_branch"] = _branch_proc.stdout.strip()
-    config = load_config(**overrides)
-    checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
+    if stage == "design" and "research" not in stages_being_run:
+        open_count = _count_all_open_research_issues(repo, milestone)
+        if open_count > 0:
+            raise click.ClickException(
+                f"{open_count} open research issue(s) remain for milestone '{milestone}'. "
+                "Run `brimstone run --research` first, or use `--all` to run all stages."
+            )
 
-    milestone = version
-
-    if stage == "initialize":
-        _run_initialize(
-            repo_ref=repo_ref,
-            local_path=local_path,
-            version=version,
-            spec=spec,
-            dry_run=dry_run,
-        )
-
-    elif stage == "plan-milestones":
-        _config, _checkpoint = startup_sequence(
-            config=config,
-            checkpoint_path=checkpoint_path,
-            milestone=version,
-            stage="plan-milestones",
-        )
-        _run_plan_milestones(
-            repo=repo_ref,
-            version=version,
-            config=_config,
-            checkpoint=_checkpoint,
-            local_path=local_path,
-            dry_run=dry_run,
-        )
-
-    elif stage == "research-worker":
-        _config, _checkpoint = startup_sequence(
-            config=config,
-            checkpoint_path=checkpoint_path,
-            milestone=milestone,
-            stage="research",
-        )
-        _run_research_worker(
-            repo=repo_ref,
-            milestone=milestone,
-            config=_config,
-            checkpoint=_checkpoint,
-            dry_run=dry_run,
-        )
-
-    elif stage == "design-worker":
-        _config, _checkpoint = startup_sequence(
-            config=config,
-            checkpoint_path=checkpoint_path,
-            milestone=milestone,
-            stage="design",
-        )
-        _run_design_worker(
-            repo=repo_ref,
-            milestone=milestone,
-            config=_config,
-            checkpoint=_checkpoint,
-            dry_run=dry_run,
-        )
-
-    elif stage == "plan-issues":
-        _config, _checkpoint = startup_sequence(
-            config=config,
-            checkpoint_path=checkpoint_path,
-            milestone=milestone,
-            stage="plan-issues",
-        )
-        _run_plan_issues(
-            repo=repo_ref,
-            milestone=milestone,
-            config=_config,
-            checkpoint=_checkpoint,
-            dry_run=dry_run,
-        )
-
-    elif stage == "impl-worker":
-        _config, _checkpoint = startup_sequence(
-            config=config,
-            checkpoint_path=checkpoint_path,
-            milestone=milestone,
-            stage="impl",
-        )
-        _run_impl_worker(
-            repo=repo_ref,
-            milestone=milestone,
-            config=_config,
-            checkpoint=_checkpoint,
-            dry_run=dry_run,
-        )
-
-    else:
-        raise click.ClickException(f"Unknown pipeline stage: {stage!r}")
+    if stage == "impl" and "design" not in stages_being_run:
+        hld_path = "docs/design/HLD.md"
+        if not _doc_exists_on_default_branch(repo, hld_path, default_branch):
+            raise click.ClickException(
+                f"Design doc '{hld_path}' does not exist on branch '{default_branch}'. "
+                "Run `brimstone run --design` first, or use `--all` to run all stages."
+            )
 
 
 @composer.command("run")
@@ -3834,148 +4321,248 @@ def _run_pipeline_stage(
         "or omit to operate on the current working directory."
     ),
 )
-@click.option(
-    "--spec",
-    type=click.Path(dir_okay=False),
-    default=None,
-    help=(
-        "Path to a .md spec file to seed into the target repo during the initialize stage. "
-        "Accepts relative (resolved from cwd) or absolute paths."
-    ),
-)
-@click.option(
-    "--version",
-    default=None,
-    help=(
-        "Version name override (e.g. 'MVP', 'v2'). "
-        "Defaults to the spec filename stem when --spec is given."
-    ),
-)
-@click.option(
-    "--from",
-    "from_stage",
-    default=None,
-    help=(
-        "Resume from a specific stage, skipping earlier ones. "
-        f"Valid values: {', '.join(_PIPELINE_STAGES)}"
-    ),
-)
+@click.option("--research", "do_research", is_flag=True, help="Run the research stage")
+@click.option("--design", "do_design", is_flag=True, help="Run the design stage")
+@click.option("--impl", "do_impl", is_flag=True, help="Run the implementation stage")
+@click.option("--all", "do_all", is_flag=True, help="Run all pipeline stages in order")
+@click.option("--milestone", required=True, help="Milestone name to operate on")
+@click.option("--model", default=None, help="Override Claude model")
+@click.option("--max-budget", type=float, default=None, help="USD budget cap")
 @click.option("--dry-run", is_flag=True, help="Print what each stage would do without executing")
 def run(
     repo: str | None,
-    spec: str | None,
-    version: str | None,
-    from_stage: str | None,
+    do_research: bool,
+    do_design: bool,
+    do_impl: bool,
+    do_all: bool,
+    milestone: str,
+    model: str | None,
+    max_budget: float | None,
     dry_run: bool,
 ) -> None:
-    """Run the full pipeline end-to-end.
+    """Run one or more pipeline stages for a milestone.
 
-    Stages: initialize → plan-milestones → research-worker → design-worker → plan-issues →
-    impl-worker.
+    Stages execute in pipeline order: research → design → impl.
+    Prerequisites are checked before each stage unless the prerequisite is
+    also being run in the same invocation.
+
+    Examples:
+
+      brimstone run --research --milestone "MVP Research"
+
+      brimstone run --design --impl --milestone "MVP Research"
+
+      brimstone run --all --milestone "MVP Research" --dry-run
     """
-    # composer run IS the top-level orchestrator; its internal stage calls are direct
-    # Python function invocations, not nested Claude Code sessions. Clear the env var
-    # so sub-stage load_config() calls don't raise OrchestratorNestingError.
+    # This is the top-level orchestrator; stage calls are direct Python
+    # invocations, not nested Claude Code sessions.
     os.environ.pop("CLAUDECODE", None)
 
     # -----------------------------------------------------------------------
-    # Validate --from
+    # Determine ordered stages to run
     # -----------------------------------------------------------------------
-    if from_stage is not None and from_stage not in _PIPELINE_STAGES:
-        raise click.UsageError(
-            f"Invalid --from value: {from_stage!r}. Valid values: {', '.join(_PIPELINE_STAGES)}"
-        )
+    if do_all:
+        stages: list[str] = ["research", "design", "impl"]
+    else:
+        stages = [
+            s
+            for s, flag in [
+                ("research", do_research),
+                ("design", do_design),
+                ("impl", do_impl),
+            ]
+            if flag
+        ]
+
+    if not stages:
+        raise click.UsageError("Specify at least one stage: --research, --design, --impl, or --all")
 
     # -----------------------------------------------------------------------
-    # Validate --spec and derive --version
-    # -----------------------------------------------------------------------
-    resolved_spec: Path | None = None
-    if spec is not None:
-        resolved_spec = _validate_spec_path(spec)
-
-    if version is None:
-        if resolved_spec is not None:
-            version = resolved_spec.stem
-        elif from_stage is not None:
-            # Resuming from a mid-pipeline stage — infer version (and repo) from checkpoint.
-            _chk_path = Path("~/.composer/checkpoints/current.json").expanduser()
-            _chk = session.load(_chk_path)
-            if _chk is not None:
-                version = _chk.milestone
-                if repo is None:
-                    repo = _chk.repo
-            else:
-                raise click.UsageError(
-                    "--version is required when --spec is not provided and no checkpoint exists. "
-                    "Pass --version to identify the milestone pair."
-                )
-        else:
-            raise click.UsageError(
-                "--version is required when --spec is not provided. "
-                "Pass --version MVP (or another version name) to identify the milestone pair."
-            )
-
-    # -----------------------------------------------------------------------
-    # Resolve repo
+    # Resolve repo and build base config
     # -----------------------------------------------------------------------
     repo_ref, local_path = _resolve_repo(repo)
-
-    # When a local repo path is known, change into it so that all subsequent
-    # git commands and health checks run against the correct repository.
     if local_path is not None:
         os.chdir(local_path)
 
-    # -----------------------------------------------------------------------
-    # Determine which stages to skip based on --from
-    # -----------------------------------------------------------------------
-    start_index = 0
-    if from_stage is not None:
-        start_index = _PIPELINE_STAGES.index(from_stage)
+    overrides: dict = {
+        "github_repo": repo_ref or None,
+        "target_repo": repo_ref or None,
+    }
+    if model:
+        overrides["model"] = model
+    if max_budget is not None:
+        overrides["max_budget_usd"] = max_budget
+    config = load_config(**overrides)
+    checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
+
+    # Propagate GitHub token to os.environ so _gh() calls use yeast-bot's token
+    # before startup_sequence() is invoked (e.g. for _milestone_exists check).
+    if config.github_token:
+        os.environ["GH_TOKEN"] = config.github_token
 
     # -----------------------------------------------------------------------
-    # Run each stage in order
+    # Non-init repo check: milestone must exist before any stage can run
     # -----------------------------------------------------------------------
-    for idx, stage in enumerate(_PIPELINE_STAGES):
-        click.echo(f"\n── Stage: {stage} ──")
+    if not dry_run:
+        if not _milestone_exists(repo_ref, milestone):
+            raise click.ClickException(
+                f"Milestone '{milestone}' not found on {repo_ref}. "
+                "Run `brimstone init --repo <repo> --spec <path>` to create it."
+            )
 
-        if idx < start_index:
-            click.echo(f"[skip] {stage}")
-            continue
+    # Resolve default branch once for gate checks
+    default_branch = _get_default_branch_for_repo(repo_ref) if repo_ref and not dry_run else "main"
+
+    # -----------------------------------------------------------------------
+    # Execute stages in pipeline order
+    # -----------------------------------------------------------------------
+    for stage in stages:
+        click.echo(f"\n── Stage: {stage} ──", err=True)
+
+        # Completion check — skip if stage is already done
+        if not dry_run:
+            if stage == "research" and _count_all_open_research_issues(repo_ref, milestone) == 0:
+                click.echo(f"[run] {stage}: already complete, skipping", err=True)
+                continue
+            if stage == "design" and _doc_exists_on_default_branch(
+                repo_ref, "docs/design/HLD.md", default_branch
+            ):
+                click.echo(f"[run] {stage}: already complete, skipping", err=True)
+                continue
+
+        # Gate check — only when prerequisite is not also in this run
+        if not dry_run:
+            _check_gate_before_stage(stage, stages, repo_ref, milestone, default_branch)
 
         if dry_run:
-            click.echo(f"[dry-run] would invoke {stage}")
+            click.echo(f"[dry-run] would run {stage} for milestone={milestone!r}", err=True)
             continue
 
-        try:
-            _run_pipeline_stage(
-                stage=stage,
-                repo_ref=repo_ref,
-                local_path=local_path,
-                version=version,
-                spec=str(resolved_spec) if resolved_spec is not None else None,
-                dry_run=dry_run,
+        _config, _checkpoint = startup_sequence(
+            config=config,
+            checkpoint_path=checkpoint_path,
+            milestone=milestone,
+            stage=stage,
+        )
+
+        if stage == "research":
+            _run_research_worker(
+                repo=repo_ref,
+                milestone=milestone,
+                config=_config,
+                checkpoint=_checkpoint,
+                dry_run=False,
             )
-        except SystemExit as exc:
-            exit_code = exc.code if exc.code is not None else 1
-            if exit_code != 0:
-                resume_cmd = f"composer run --from {stage}"
-                if repo:
-                    resume_cmd += f" --repo {repo}"
-                cause = exc.__cause__
-                if cause is not None:
-                    click.echo(str(cause), err=True)
+        elif stage == "design":
+            _run_design_worker(
+                repo=repo_ref,
+                milestone=milestone,
+                config=_config,
+                checkpoint=_checkpoint,
+                dry_run=False,
+            )
+        elif stage == "impl":
+            # Auto-run plan-issues first if no open impl issues exist yet
+            open_impl = _list_open_impl_issues(repo_ref, milestone)
+            if not open_impl:
                 click.echo(
-                    f"Error: {stage} failed. To resume: {resume_cmd}",
+                    f"[run] No open impl issues found for '{milestone}'; "
+                    "running plan-issues first...",
                     err=True,
                 )
-                raise SystemExit(1) from exc
-        except Exception as exc:
-            resume_cmd = f"composer run --from {stage}"
-            if repo:
-                resume_cmd += f" --repo {repo}"
-            click.echo(str(exc), err=True)
-            click.echo(
-                f"Error: {stage} failed. To resume: {resume_cmd}",
-                err=True,
+                _run_plan_issues(
+                    repo=repo_ref,
+                    milestone=milestone,
+                    config=_config,
+                    checkpoint=_checkpoint,
+                    dry_run=False,
+                )
+            _run_impl_worker(
+                repo=repo_ref,
+                milestone=milestone,
+                config=_config,
+                checkpoint=_checkpoint,
+                dry_run=False,
             )
-            raise SystemExit(1) from exc
+
+
+@composer.command("init")
+@click.option(
+    "--repo",
+    required=True,
+    help="Target repository in 'owner/name' format.",
+)
+@click.option(
+    "--spec",
+    required=True,
+    type=click.Path(dir_okay=False),
+    help="Path to the .md spec file to seed into the target repo.",
+)
+@click.option("--model", default=None, help="Override Claude model")
+@click.option("--dry-run", is_flag=True, help="Print what would happen without executing")
+def init(
+    repo: str,
+    spec: str,
+    model: str | None,
+    dry_run: bool,
+) -> None:
+    """Upload a spec and seed the milestone + research issues.
+
+    Equivalent to: upload spec → run plan-milestones.
+
+    After this command completes, use:
+      brimstone run --research --milestone <version>
+    """
+    resolved_spec = _validate_spec_path(spec)
+    version = resolved_spec.stem
+
+    repo_ref, local_path = _resolve_repo(repo)
+    overrides: dict = {"github_repo": repo_ref or None, "target_repo": repo_ref or None}
+    if model:
+        overrides["model"] = model
+    config = load_config(**overrides)
+    checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
+
+    _HEADLESS_SKIP = frozenset(
+        {
+            "Git repo present",
+            "Default branch matches config",
+            "No stale in-progress issues",
+            "Open PRs needing attention",
+            "No active worktrees",
+        }
+    )
+    _config, _checkpoint = startup_sequence(
+        config=config,
+        checkpoint_path=checkpoint_path,
+        milestone=version,
+        stage="plan-milestones",
+        skip_checks=_HEADLESS_SKIP,
+    )
+
+    if dry_run:
+        click.echo(f"[dry-run] would upload {resolved_spec} to {repo_ref}/docs/specs/{version}.md")
+        click.echo(f"[dry-run] would add {_BRIMSTONE_BOT} as collaborator on {repo_ref}")
+        _setup_ci(repo_ref, _config, dry_run=True)
+    else:
+        _add_brimstone_bot_collaborator(repo_ref)
+        _upload_spec_to_repo(repo_ref, resolved_spec, version)
+        _setup_ci(repo_ref, _config, dry_run=False)
+
+    _run_plan_milestones(
+        repo=repo_ref,
+        version=version,
+        config=_config,
+        checkpoint=_checkpoint,
+        local_path=local_path,
+        dry_run=dry_run,
+    )
+
+
+@composer.command("adopt")
+@click.option("--source-repo", required=True, help="Source repository to adopt from.")
+@click.option("--target-repo", default=None, help="Target repository (defaults to source).")
+def adopt(source_repo: str, target_repo: str | None) -> None:
+    """Adopt an existing repository into the brimstone pipeline. (Not yet implemented.)"""
+    click.echo("adopt: not yet implemented", err=True)
+    raise SystemExit(1)
