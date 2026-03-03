@@ -707,23 +707,28 @@ def acquire_orchestrator_lock(config: Config, run_id: str) -> None:
             except OSError:
                 pass
         else:
-            try:
-                os.kill(pid, 0)
-                # PID alive — cannot acquire
-                raise FatalHealthCheckError(
-                    f"Another orchestrator is running (PID {pid}). Stop it first."
-                )
-            except ProcessLookupError:
-                # PID dead — remove stale lock and continue
+            if pid == os.getpid():
+                # Current process already holds the lock — allow re-acquisition
+                # (happens when run calls startup_sequence once per stage)
+                pass
+            else:
                 try:
-                    lock_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            except PermissionError:
-                # PID alive (no permission to signal)
-                raise FatalHealthCheckError(
-                    f"Another orchestrator is running (PID {pid}). Stop it first."
-                )
+                    os.kill(pid, 0)
+                    # PID alive — cannot acquire
+                    raise FatalHealthCheckError(
+                        f"Another orchestrator is running (PID {pid}). Stop it first."
+                    )
+                except ProcessLookupError:
+                    # PID dead — remove stale lock and continue
+                    try:
+                        lock_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                except PermissionError:
+                    # PID alive (no permission to signal)
+                    raise FatalHealthCheckError(
+                        f"Another orchestrator is running (PID {pid}). Stop it first."
+                    )
 
     # Write lock atomically via tmp + os.replace
     lock_data = {
