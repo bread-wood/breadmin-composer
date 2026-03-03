@@ -1688,6 +1688,16 @@ def _run_research_worker(
         worktree_dir = os.path.join(repo_root, ".claude", "worktrees", branch_name)
 
         base_prompt = (
+            f"## MANDATORY: Working Directory\n"
+            f"You are working in an isolated git worktree. Your FIRST action must be:\n"
+            f"```\n"
+            f"cd {worktree_dir}\n"
+            f"```\n"
+            f"ALL file writes and git operations must happen inside `{worktree_dir}`.\n"
+            f"The branch `{branch_name}` is already checked out there.\n"
+            f"Do NOT write to /tmp, /var/folders, ~/, or the main repo checkout.\n"
+            f"Your research document goes in: `{worktree_dir}/docs/research/{milestone}/`\n"
+            f"\n"
             f"## Session Parameters\n"
             f"- Repository: {repo}\n"
             f"- Active Milestone: {milestone}\n"
