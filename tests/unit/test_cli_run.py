@@ -35,6 +35,7 @@ def _make_mock_spec(tmp_path: Path) -> Path:
 class TestPipelineStagesConstant:
     def test_stages_in_correct_order(self) -> None:
         assert _PIPELINE_STAGES == [
+            "initialize",
             "plan-milestones",
             "research-worker",
             "design-worker",
@@ -138,9 +139,9 @@ class TestRunStageOrder:
                 )
 
         assert result.exit_code == 0, result.output
-        # Check the plan-milestones call
+        # Check the initialize call (first stage)
         first_call_kwargs = mock_stage.call_args_list[0].kwargs
-        assert first_call_kwargs["stage"] == "plan-milestones"
+        assert first_call_kwargs["stage"] == "initialize"
         assert first_call_kwargs["repo_ref"] == "owner/repo"
         assert first_call_kwargs["version"] == "MVP"
         assert first_call_kwargs["dry_run"] is False
@@ -188,8 +189,8 @@ class TestRunFromStage:
         # plan-milestones must not appear
         assert "plan-milestones" not in called_stages
 
-    def test_from_plan_milestones_runs_all_stages(self, tmp_path: Path) -> None:
-        """--from plan-milestones (first stage) runs all stages."""
+    def test_from_plan_milestones_skips_initialize(self, tmp_path: Path) -> None:
+        """--from plan-milestones skips initialize and runs the remaining stages."""
         called_stages: list[str] = []
 
         def fake_run_stage(stage: str, **kwargs: object) -> None:
@@ -215,7 +216,8 @@ class TestRunFromStage:
                 )
 
         assert result.exit_code == 0, result.output
-        assert called_stages == _PIPELINE_STAGES
+        assert called_stages == _PIPELINE_STAGES[1:]
+        assert "initialize" not in called_stages
 
     def test_from_impl_worker_runs_only_last_stage(self, tmp_path: Path) -> None:
         """--from impl-worker must skip all earlier stages and run only impl-worker."""
@@ -360,7 +362,7 @@ class TestRunStageFailure:
 
         assert result.exit_code != 0
         # Only stages up to and including the failing stage must have been called
-        assert called_stages == ["plan-milestones", "research-worker"]
+        assert called_stages == ["initialize", "plan-milestones", "research-worker"]
         # design-worker and later must NOT have been called
         assert "design-worker" not in called_stages
 

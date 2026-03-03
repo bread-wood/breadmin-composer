@@ -3034,6 +3034,57 @@ def _seed_spec(
     click.echo(f"Seeded spec into {dest_file} and committed.")
 
 
+def _run_initialize(
+    repo_ref: str,
+    local_path: str | None,
+    version: str,
+    spec: str | None,
+    dry_run: bool = False,
+) -> None:
+    """Set up the target repository and optionally seed the spec file.
+
+    This is the first pipeline stage.  It is purely a Python operation —
+    no Claude agent is dispatched.
+
+    - If ``local_path`` is None (remote-only repo), spec seeding is skipped
+      with a warning.
+    - If ``spec`` is provided and ``local_path`` is available, copies the spec
+      to ``docs/specs/<version>.md`` and commits it (idempotent).
+    - If ``spec`` is None and no spec file exists locally, prints a reminder
+      but does not fail — the operator must seed the spec before plan-milestones
+      can succeed.
+
+    Args:
+        repo_ref:   Resolved ``owner/name`` repository reference.
+        local_path: Absolute path to the local repo clone (or None for remote-only).
+        version:    Version identifier (e.g. ``"MVP"``).
+        spec:       Absolute path to a spec file to seed (or None).
+        dry_run:    If True, print intent without executing.
+    """
+    if dry_run:
+        click.echo(f"[dry-run] initialize: repo={repo_ref!r}, version={version!r}, spec={spec!r}")
+        return
+
+    if spec is not None:
+        if local_path is None:
+            click.echo(
+                "Warning: --spec provided but no local repo path is available "
+                "(remote-only repos require a local checkout). Spec seeding skipped."
+            )
+        else:
+            _seed_spec(Path(spec), version, local_path)
+    elif local_path is not None:
+        spec_file = Path(local_path) / "docs" / "specs" / f"{version}.md"
+        if not spec_file.exists():
+            click.echo(
+                f"Warning: No spec found at {spec_file}. "
+                "plan-milestones will fail until a spec is committed. "
+                "Pass --spec <path> or commit the spec manually."
+            )
+
+    click.echo(f"initialize: repo={repo_ref!r} version={version!r} ready.")
+
+
 def _run_plan_milestones(
     repo: str,
     version: str,
@@ -3472,6 +3523,7 @@ def cost() -> None:
 
 # Valid stage names in pipeline order
 _PIPELINE_STAGES: list[str] = [
+    "initialize",
     "plan-milestones",
     "research-worker",
     "design-worker",
@@ -3499,7 +3551,7 @@ def _run_pipeline_stage(
         repo_ref:   Resolved ``owner/name`` repository reference.
         local_path: Absolute path to the local repo clone (or None for remote-only).
         version:    Version identifier (e.g. ``"MVP"``).
-        spec:       Absolute path to a spec file to seed (plan-milestones only, or None).
+        spec:       Absolute path to a spec file to seed (initialize stage only, or None).
         dry_run:    If True, print intent without executing.
 
     Raises:
@@ -3525,22 +3577,22 @@ def _run_pipeline_stage(
     research_milestone = f"{version} Research"
     impl_milestone = f"{version} Implementation"
 
-    if stage == "plan-milestones":
+    if stage == "initialize":
+        _run_initialize(
+            repo_ref=repo_ref,
+            local_path=local_path,
+            version=version,
+            spec=spec,
+            dry_run=dry_run,
+        )
+
+    elif stage == "plan-milestones":
         _config, _checkpoint = startup_sequence(
             config=config,
             checkpoint_path=checkpoint_path,
             milestone=version,
             stage="plan-milestones",
         )
-        # Seed spec if provided
-        if spec is not None:
-            resolved_spec = Path(spec)
-            if local_path is None:
-                raise click.ClickException(
-                    "--spec requires a local repository path. "
-                    "Pass --repo path/to/local/dir or omit --repo to operate on cwd."
-                )
-            _seed_spec(resolved_spec, version, local_path)
         _run_plan_milestones(
             repo=repo_ref,
             version=version,
@@ -3628,7 +3680,7 @@ def _run_pipeline_stage(
     type=click.Path(dir_okay=False),
     default=None,
     help=(
-        "Path to a .md spec file to seed into the target repo before running plan-milestones. "
+        "Path to a .md spec file to seed into the target repo during the initialize stage. "
         "Accepts relative (resolved from cwd) or absolute paths."
     ),
 )
@@ -3659,7 +3711,8 @@ def run(
 ) -> None:
     """Run the full pipeline end-to-end.
 
-    Stages: plan-milestones → research-worker → design-worker → plan-issues → impl-worker.
+    Stages: initialize → plan-milestones → research-worker → design-worker → plan-issues →
+    impl-worker.
     """
     # composer run IS the top-level orchestrator; its internal stage calls are direct
     # Python function invocations, not nested Claude Code sessions. Clear the env var
