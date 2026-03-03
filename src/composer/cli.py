@@ -3237,20 +3237,22 @@ def _run_plan_milestones(
             click.echo(f"stderr:\n{result.stderr[:2000]}", err=True)
         raise SystemExit(1)
     elif result.subtype == "missing_result_event":
+        click.echo(
+            "Warning: agent subprocess exited without producing any output "
+            "(exit 0, no stream-json events). subtype=missing_result_event",
+            err=True,
+        )
+        if result.stderr:
+            click.echo(f"Subprocess stderr:\n{result.stderr[:2000]}", err=True)
+        else:
+            click.echo("Subprocess stderr: (empty)", err=True)
         if not dry_run:
-            click.echo(
-                "Warning: plan-milestones subprocess exited without a result event "
-                "(known Claude Code issue). Verifying milestone was created…",
-                err=True,
-            )
-            if result.stderr:
-                click.echo(f"Subprocess stderr:\n{result.stderr[:2000]}", err=True)
+            click.echo("Verifying milestone was created…", err=True)
     else:
         if not dry_run:
             click.echo(f"Plan-milestones complete for version '{version}'.")
 
     if dry_run:
-        # In dry-run the agent outputs its plan to stdout but creates nothing.
         return
 
     # Post-validation: confirm the milestone was actually created.
