@@ -4267,6 +4267,7 @@ def _run_plan_milestones(
     local_path: str | None = None,
     dry_run: bool = False,
     spec_stem: str | None = None,
+    spec_local_path: str | None = None,
 ) -> None:
     """Dispatch a single plan-milestones agent to create a milestone pair and seed issues.
 
@@ -4275,21 +4276,28 @@ def _run_plan_milestones(
     milestones, and files seed research issues.
 
     Args:
-        repo:       GitHub repository in ``owner/repo`` format.
-        version:    Milestone name (e.g. ``"v0.1.0-cold-start"``).
-        config:     Validated Config instance.
-        checkpoint: Active Checkpoint instance.
-        local_path: Absolute path to the local repo checkout (or None for remote-only).
-        dry_run:    If True, print the prompt length without executing.
-        spec_stem:  Filename stem of the spec file (e.g. ``"v0.1.x-cold-start"``).
-                    When None, falls back to ``version``.
+        repo:            GitHub repository in ``owner/repo`` format.
+        version:         Milestone name (e.g. ``"v0.1.0-cold-start"``).
+        config:          Validated Config instance.
+        checkpoint:      Active Checkpoint instance.
+        local_path:      Absolute path to the local repo checkout (or None for remote-only).
+        dry_run:         If True, print the prompt length without executing.
+        spec_stem:       Filename stem of the spec file (e.g. ``"v0.1.x-cold-start"``).
+                         When None, falls back to ``version``.
+        spec_local_path: Absolute path to the original spec file on disk. When provided,
+                         the agent is told to read directly from this path, which is
+                         more reliable than deriving a path from local_path or the API.
     """
     if spec_stem is None:
         spec_stem = version
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
     today = date.today().isoformat()
 
-    if local_path is not None:
+    if spec_local_path is not None:
+        spec_read_instruction = (
+            f"Read the spec from the local file:\n  cat {spec_local_path}"
+        )
+    elif local_path is not None:
         spec_read_instruction = (
             f"Read the spec from the local checkout:\n  cat {local_path}/docs/specs/{spec_stem}.md"
         )
@@ -4789,6 +4797,7 @@ def init(
         local_path=local_path,
         dry_run=dry_run,
         spec_stem=spec_stem,
+        spec_local_path=str(resolved_spec),
     )
 
 
