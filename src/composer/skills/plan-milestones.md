@@ -97,9 +97,6 @@ gh issue list --state closed --limit 200 --json number,title,milestone,labels
 gh issue list --state open --limit 200 --json number,title,milestone,labels
 ```
 
-Read the last 3–5 session Notion reports if available to understand what was completed
-and what gaps or follow-ups were identified.
-
 ### Step 2 — Define the Next Version Scope
 
 Use the spec's **Scope**, **Constraints**, and **Success Criteria** sections to anchor the
@@ -185,11 +182,6 @@ File the next pipeline stage issue:
 ```bash
 gh issue create --title "Run research-worker for <research milestone>" --label "pipeline" --milestone "<research milestone>"
 ```
-
-Post a Notion report under "CC Autonomous Coding Sessions"
-(parent page ID: `317bb275-6a02-803d-a59f-dc56c3527942`) with:
-- **Title**: `Milestone Plan — {YYYY-MM-DD} — {repo name} — {version name}`
-- **Body**: version scope (from spec), milestones created, seed issues, next steps
 
 ## Constraints
 

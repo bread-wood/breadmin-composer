@@ -142,7 +142,7 @@ class TestRunDesignWorker:
         assert "Write" in allowed_tools
         assert "Glob" in allowed_tools
         assert "Grep" in allowed_tools
-        assert "mcp__notion__API-post-page" in allowed_tools
+        assert "mcp__notion__API-post-page" not in allowed_tools
         # design-worker must NOT dispatch sub-agents, so no agent tool
         assert "mcp__claude_code__execute" not in allowed_tools
 
@@ -281,7 +281,7 @@ class TestRunPlanIssues:
         assert "Read" in allowed_tools
         assert "Glob" in allowed_tools
         assert "Grep" in allowed_tools
-        assert "mcp__notion__API-post-page" in allowed_tools
+        assert "mcp__notion__API-post-page" not in allowed_tools
         # plan-issues only reads files and calls gh; must NOT use Write/Edit
         assert "Write" not in allowed_tools
         assert "Edit" not in allowed_tools

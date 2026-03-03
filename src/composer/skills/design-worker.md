@@ -160,11 +160,6 @@ gh issue create \
   --milestone "<research-milestone>"
 ```
 
-Post a Notion report under "CC Autonomous Coding Sessions"
-(parent page ID: `317bb275-6a02-803d-a59f-dc56c3527942`) with:
-- **Title**: `Design Session — {YYYY-MM-DD} — {repo name}`
-- **Body**: research milestone processed, design docs produced, coverage gaps, verdict
-
 ## Constraints
 
 - **No code** — design-worker creates design documents only, never touches source files
@@ -172,4 +167,4 @@ Post a Notion report under "CC Autonomous Coding Sessions"
 - **No dispatching** — design-worker does not launch sub-agents
 - **One PR per doc** — HLD gets its own PR; each LLD gets its own PR; merge before writing the next
 - **No gold-plating** — document only what research explicitly determined; don't invent scope
-- **Post session report to Notion** when done
+- Report progress: log each doc produced/merged as it happens

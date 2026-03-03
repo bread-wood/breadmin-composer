@@ -249,12 +249,6 @@ When the pipeline drains for the active milestone:
    gh issue create --title "Run design-worker for <milestone>" --label "pipeline" --milestone "<milestone>"
    ```
 
-3. **Post a Notion report** under "CC Autonomous Coding Sessions"
-   (parent page ID: `317bb275-6a02-803d-a59f-dc56c3527942`) using
-   `mcp__notion__API-post-page` with:
-   - **Title**: `Research Session — {YYYY-MM-DD} — {repo name}`
-   - **Body**: research completed, follow-ups created, gaps identified, remaining work
-
 ## Constraints
 
 - **Maximum 5 parallel agents** — respect this limit at all times
@@ -263,5 +257,4 @@ When the pipeline drains for the active milestone:
 - **PRs must have full descriptions** — title, summary, key findings, follow-ups spawned
 - **No infinite loops** — stop when the milestone queue is empty
 - **Triage every follow-up before dispatch** — apply rubric immediately after each merge; close failing issues with `wont-research`; remove `triage` label from passing issues
-- **Post session report to Notion** when done
 - Report progress: log each completion/merge/follow-up creation as it happens

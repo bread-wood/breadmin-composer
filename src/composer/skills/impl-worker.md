@@ -143,19 +143,11 @@ When the pipeline is fully drained (no active agents, no remaining dispatchable 
      --label "pipeline"
    ```
 
-3. **Post a Notion report** under "CC Autonomous Coding Sessions"
-   (parent page ID: `317bb275-6a02-803d-a59f-dc56c3527942`) using
-   `mcp__notion__API-post-page` with:
-   - **Title**: `Session Report — {YYYY-MM-DD} — {repo name}`
-   - **Body** (as Notion blocks): issues attempted, PRs merged, issues
-     failed/abandoned, newly unblocked issues for next run, and total duration
-
 ## Constraints
 
 - **Operate autonomously** — do not ask for confirmation before dispatching work
   (only ask during startup if orphaned work is detected)
 - **Fill freed module slots immediately** as agents complete — maintain maximum throughput
-- **Post session report to Notion** when the pipeline drains
 - Maximize parallelism: dispatch as many non-conflicting agents as possible
 - Respect module isolation: only one agent per module/package scope at a time
 - Serialize merges: merge one PR at a time, rebase others if needed
