@@ -1832,6 +1832,10 @@ def _run_research_worker(
                     config=config,
                     checkpoint=checkpoint,
                 )
+                # Remove in-progress label and assignee. GitHub auto-closes the
+                # issue via "Closes #N" in the commit message but never touches
+                # labels or assignees.
+                _unclaim_issue(repo=repo, issue_number=issue_number)
             else:
                 click.echo(
                     f"[research-worker] Warning: no branch found for issue #{issue_number}",
@@ -4575,6 +4579,23 @@ def run(
     # -----------------------------------------------------------------------
     repo_ref, local_path = _resolve_repo(repo)
     if local_path is not None:
+        os.chdir(local_path)
+    elif repo_ref:
+        # Remote owner/name repo: clone into a temp dir so workers can create
+        # git worktrees. _get_repo_root() inside each worker will then return
+        # the clone root rather than brimstone's own source tree.
+        tmp_clone = tempfile.mkdtemp(prefix=f"brimstone-repo-")
+        click.echo(f"[run] Cloning {repo_ref} into {tmp_clone}…", err=True)
+        clone_result = subprocess.run(
+            ["gh", "repo", "clone", repo_ref, tmp_clone],
+            capture_output=True,
+            text=True,
+        )
+        if clone_result.returncode != 0:
+            raise click.ClickException(
+                f"Failed to clone {repo_ref}:\n{clone_result.stderr}"
+            )
+        local_path = tmp_clone
         os.chdir(local_path)
 
     overrides: dict = {
