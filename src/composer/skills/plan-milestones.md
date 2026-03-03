@@ -1,12 +1,8 @@
-Plan the next set of milestones for this repository.
-
-Run this at two points:
-1. **Project start** — plan MVP and the version after it
-2. **When implementation begins** — plan the next research phase so it runs in parallel
+Plan the next milestone and file a complete research queue for it.
 
 ## When to Run
 
-- Before the first research-worker session (plan MVP research + MVP impl milestones)
+- Before the first research-worker session (plan MVP)
 - When impl-worker begins a version (plan the research phase for version N+1)
 - Never plan more than one version ahead — research findings change scope
 
@@ -32,33 +28,6 @@ git -C <local_path> checkout $DEFAULT_BRANCH && git -C <local_path> pull origin 
 ```
 
 Read the project CLAUDE.md to understand the domain and constraints.
-
-### Spec Seeding (`--spec`)
-
-When `--spec <path>` is passed to `composer plan-milestones`, the CLI resolves and copies the
-spec file into the target repo **before** this skill runs. By the time this skill executes,
-`docs/specs/<version>.md` is already committed in the target repo — proceed directly to Step 0.
-
-**How it works:**
-- `--spec` accepts a relative path (resolved from cwd) or an absolute path to a `.md` file.
-- The version name is inferred from the spec filename stem (e.g. `calculator.md` → `calculator`)
-  unless `--version` is explicitly provided.
-- If `docs/specs/<version>.md` already exists in the target repo, the copy is skipped and a
-  warning is printed; the skill proceeds with the existing file.
-- The spec file is copied to `docs/specs/<version>.md`, then `git add`ed and committed with
-  the message `docs: seed spec from <source path>`.
-
-**Example invocations:**
-```bash
-# Relative path (resolved from cwd)
-composer plan-milestones --repo calculator-cli --spec docs/specs/calculator.md
-
-# Absolute path
-composer plan-milestones --repo calculator-cli --spec /Users/me/specs/calculator.md
-
-# Override version name
-composer plan-milestones --repo calculator-cli --spec docs/specs/calculator.md --version MVP
-```
 
 ## Execution
 
@@ -87,8 +56,9 @@ Before running plan-milestones, a human must write the spec using the template:
 Write the spec, commit it, and then re-run plan-milestones.
 ```
 
-Do not invent scope, goals, or research questions. Everything in Steps 1–4 must be grounded
-in the spec. The spec is the single source of truth.
+The spec defines scope, constraints, and success criteria. It is the authority on **what** to build.
+Your job in the steps below is to figure out **how** — decomposing every aspect that requires
+research before implementation can begin.
 
 ### Step 1 — Assess Current State
 
@@ -103,32 +73,27 @@ gh issue list --state closed --limit 200 --json number,title,milestone,labels
 gh issue list --state open --limit 200 --json number,title,milestone,labels
 ```
 
-### Step 2 — Define the Next Version Scope
+### Step 2 — Define the Version Scope
 
-Use the spec's **Scope**, **Constraints**, and **Success Criteria** sections to anchor the
-version scope. Do not override or extend what the spec defines.
-
-**Version naming**: choose a meaningful identifier (MVP, v1.1, v2, etc.) — not M3/M4.
-The milestone title is the version name only (e.g. `v1`, `MVP`). Do NOT append "Research"
-or "Implementation" — all stages for a version share the same milestone; workers select
-work by `stage/*` label, not by milestone name.
-
-**Scope document** — write a brief version scope in your thinking before creating anything.
-This must mirror the spec — not re-derive it:
+Write a brief scope summary in your thinking before creating anything.
+Mirror the spec exactly — do not add or remove scope:
 
 ```
 Version: <name>
 Goal: <from spec Overview>
 Included: <from spec Scope section>
 Excluded (next version): <from spec Non-Goals section>
-Seed research questions: <from spec Key Unknowns section — not invented>
 Constraints: <from spec Constraints section>
 ```
 
+**Version naming**: use a meaningful identifier (MVP, v1.1, v2, etc.) — not M3/M4.
+The milestone title is the version name only (e.g. `v1`, `MVP`). Do NOT append "Research"
+or "Implementation" — all stages for a version share one milestone; workers select work
+by `stage/*` label, not by milestone name.
+
 ### Step 3 — Create Milestone
 
-Create a single milestone for the version. All issues (research, design, impl) for this
-version will live under this milestone; workers distinguish their work by `stage/*` label.
+Create a single milestone for the version.
 
 ```bash
 gh api repos/<owner>/<repo>/milestones \
@@ -136,38 +101,98 @@ gh api repos/<owner>/<repo>/milestones \
   -f description="<one-line goal for this version>"
 ```
 
-### Step 4 — File Seed Research Issues
+### Step 4 — Decompose Into a Full Research Queue
 
-File seed research issues in the new milestone with label `research` and `stage/research`.
-Source the research questions **directly from the spec's Key Unknowns section** — do not
-invent questions.
+**Goal**: produce a complete set of research issues so that when research-worker finishes,
+design-worker has everything it needs to write the HLD and LLDs without any unknowns.
 
-Apply the `[BLOCKS_IMPL]` filter: only file an issue if not knowing the answer would block
-implementation. A Key Unknown in the spec that is answerable in 10 seconds or that does not
-change the design is not worth a standalone issue — note it inline instead.
+Specs are intentionally high-level. Do not limit yourself to the spec's "Key Unknowns"
+section — treat it as one input among many. Your job is to reason about every aspect of the
+implementation and ask: *what do we need to know before we can design this?*
 
-For each qualifying Key Unknown:
+#### Decomposition dimensions
+
+Work through every dimension below. For each one, ask whether there is a genuine unknown
+that would affect a design decision. If yes, file a research issue.
+
+**Architecture & approach**
+- What architectural patterns are appropriate? Are there established conventions in this
+  domain or ecosystem we should follow?
+- Are there multiple viable approaches? What are the trade-offs?
+- What are the system boundaries and integration points?
+
+**APIs, libraries, and tooling**
+- Which libraries or tools are candidates? What are the trade-offs (maturity, license,
+  maintenance, performance)?
+- What are the actual APIs we'll be calling? Are there undocumented behaviours or
+  known edge cases?
+- Are there version or compatibility constraints?
+
+**Data models and state**
+- What data needs to be stored, passed, or transformed?
+- What are the schema options and their trade-offs?
+- What are the consistency, ordering, or concurrency requirements?
+
+**External integrations and protocols**
+- What external services, APIs, or protocols does this touch?
+- What are their auth, rate-limiting, error, and retry behaviours?
+- Are there SDK wrappers or must we use raw HTTP?
+
+**Error handling, edge cases, and failure modes**
+- What are the failure modes for each component?
+- What does partial failure look like? What needs to be recoverable vs restartable?
+- What inputs or states can cause hard-to-debug failures?
+
+**Security and trust**
+- What are the trust boundaries? What is user-controlled vs system-controlled?
+- Are there injection, credential, or privilege-escalation risks?
+- What needs to be validated at each boundary?
+
+**Testing strategy**
+- What can be unit-tested vs what needs integration or end-to-end tests?
+- What are the hard-to-test parts? What mocking or test-double strategies work here?
+- Are there existing test patterns in the repo to follow?
+
+**Performance and resource constraints**
+- Are there latency, throughput, or memory requirements that affect design choices?
+- What are the expected load characteristics?
+
+**Developer experience and operations**
+- How will this be configured, deployed, or operated?
+- What observability (logging, metrics, tracing) is needed?
+- Are there CLI UX conventions or user-facing error message standards to follow?
+
+#### Filing research issues
+
+For each genuine unknown identified above, apply the `[BLOCKS_IMPL]` filter before filing:
+
+> **File an issue only if** not knowing the answer would cause a design-level rework of
+> an implementation task. Skip questions answerable in seconds or that only affect
+> fine-grained implementation details.
+
+For each issue that passes the filter:
 
 ```bash
 gh issue create \
   --repo <owner>/<repo> \
-  --title "Research: <question>" \
-  --label "research" \
+  --title "Research: <concise question>" \
+  --label "research,stage/research" \
   --milestone "<Version>" \
   --body "$(cat <<'EOF'
-## Background
-<Why this question matters for implementation>
-
-## Spec Reference
-Derived from the Key Unknowns section of docs/specs/<version>.md:
-> <exact quote of the Key Unknown from the spec>
+## Why This Matters
+<How the answer changes a design decision. Be specific — name the implementation component affected.>
 
 ## Research Areas
 - <specific sub-question 1>
 - <specific sub-question 2>
+- <specific sub-question 3>
+
+## Acceptance Criteria
+The research doc must answer the above questions and include a concrete recommendation
+(not just a list of options) with rationale.
 
 ## Deliverable
-A research doc at docs/research/<NN>-<slug>.md answering the above.
+A research doc at docs/research/<NN>-<slug>.md
 
 ## Dependencies
 <Depends on: #N, or "None">
@@ -175,24 +200,35 @@ EOF
 )"
 ```
 
+Group related sub-questions into a single issue rather than filing one issue per sub-question.
+Aim for 4–10 well-scoped issues that together give design-worker complete coverage.
+
 ### Step 5 — Report
 
 Print:
-- Milestones created (names, purposes)
-- Seed research issues filed (numbers, titles)
-- Explicit scope boundaries (what's in, what's out, what's next) — sourced from the spec
-- Suggested order of operations: which research issues to dispatch first
+- Milestone created (name, goal)
+- All research issues filed (numbers, titles, one-line rationale)
+- Scope boundaries: what's in, what's out, what's deferred
+- Suggested dispatch order: which issues to send to research-worker first (dependency order)
 
 File the next pipeline stage issue:
 ```bash
-gh issue create --title "Run research-worker for <research milestone>" --label "pipeline" --milestone "<research milestone>"
+gh issue create \
+  --repo <owner>/<repo> \
+  --title "Run research-worker for <version>" \
+  --label "pipeline" \
+  --milestone "<version>"
 ```
 
 ## Constraints
 
 - **Spec is required** — plan-milestones must not run without a spec file at `docs/specs/<version>.md`
-- **Spec is authoritative** — scope, constraints, and research questions come from the spec; do not override or extend them
+- **Spec defines scope** — do not add features or research questions outside the spec's scope
+- **Decompose fully** — the spec's Key Unknowns section is a starting point, not a ceiling;
+  infer and file every research question needed for design-worker to have complete coverage
+- **File an issue per topic, not per sub-question** — group related questions; aim for 4–10 issues
+- **`[BLOCKS_IMPL]` filter** — skip questions that don't affect a design decision
 - **Maximum 2 versions planned at once** — never plan 3 versions ahead
-- **Seed issues only** — do not attempt to enumerate all research questions; research-worker discovers more
-- **Scope boundaries are explicit** — every version plan must say what is out of scope and why (sourced from spec Non-Goals)
-- **No implementation issues** — plan-milestones creates only research milestones and seed research issues; design-worker creates impl issues after research completes
+- **No implementation issues** — plan-milestones creates only the milestone and research issues;
+  design-worker creates impl issues after research completes
+- **Scope boundaries are explicit** — every plan must state what is out of scope and why
