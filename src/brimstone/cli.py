@@ -1513,6 +1513,7 @@ def _run_research_worker(
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
     retry_counts: dict[int, int] = {}
     stall_count: int = 0
+    repo_root = _get_repo_root()
 
     today = date.today().isoformat()
 
@@ -1680,12 +1681,18 @@ def _run_research_worker(
         body = _sanitize_issue_body(raw_body)
 
         # ------------------------------------------------------------------
-        # STEP 5: Build prompt
+        # STEP 5: Build prompt (branch name and worktree path computed here)
         # ------------------------------------------------------------------
+        slug = _slugify(issue.get("title", "")[:40])
+        branch_name = f"{issue_number}-{slug}"
+        worktree_dir = os.path.join(repo_root, ".claude", "worktrees", branch_name)
+
         base_prompt = (
             f"## Session Parameters\n"
             f"- Repository: {repo}\n"
             f"- Active Milestone: {milestone}\n"
+            f"- Branch: {branch_name}\n"
+            f"- Working Directory: {worktree_dir}\n"
             f"- Issue: #{issue_number} — {issue.get('title', '')}\n"
             f"- Session Date: {today}\n\n"
             f"{body}"
@@ -1710,17 +1717,34 @@ def _run_research_worker(
             break
 
         # ------------------------------------------------------------------
-        # STEP 6: Claim issue
+        # STEP 6: Claim issue and create isolated worktree
         # ------------------------------------------------------------------
         _claim_issue(repo=repo, issue_number=issue_number)
         session.record_dispatch(checkpoint, str(issue_number))
         session.save(checkpoint, checkpoint_path)
 
+        # Create branch + worktree so the agent has an isolated directory to work in.
+        # _create_worktree also pushes the branch to remote.
+        worktree_path = _create_worktree(branch_name, repo_root, default_branch)
+        if worktree_path is None:
+            click.echo(
+                f"[research-worker] Failed to create worktree for #{issue_number} "
+                f"(branch={branch_name!r}) — unclaiming",
+                err=True,
+            )
+            _unclaim_issue(repo=repo, issue_number=issue_number)
+            continue
+
         logger.log_conductor_event(
             run_id=checkpoint.run_id,
             phase="claim",
             event_type="issue_claimed",
-            payload={"issue_number": issue_number, "title": issue.get("title", "")},
+            payload={
+                "issue_number": issue_number,
+                "title": issue.get("title", ""),
+                "branch": branch_name,
+                "worktree": worktree_path,
+            },
             log_dir=config.log_dir.expanduser(),
         )
 
@@ -1730,6 +1754,7 @@ def _run_research_worker(
         # STEP 7: Run the research agent
         # ------------------------------------------------------------------
         env = build_subprocess_env(config)
+        env["CLAUDE_CONFIG_DIR"] = f"/tmp/brimstone-agent-{issue_number}-{uuid.uuid4().hex}"
         try:
             result = runner.run(
                 prompt=base_prompt,
@@ -1752,6 +1777,8 @@ def _run_research_worker(
             )
         finally:
             skill_tmp.unlink(missing_ok=True)
+            # Always remove the worktree after the agent exits
+            _remove_worktree(worktree_path, repo_root)
 
         # ------------------------------------------------------------------
         # STEP 8: Handle result
@@ -1812,8 +1839,13 @@ def _run_research_worker(
         elif result.error_code in ("rate_limit", "extra_usage_exhausted") or (
             result.subtype == "error_max_budget_usd"
         ):
-            # Rate-limited or budget exhausted: unclaim and back off
+            # Rate-limited or budget exhausted: unclaim and back off.
+            # Delete the remote branch so the resume logic starts clean on retry.
             _unclaim_issue(repo=repo, issue_number=issue_number)
+            _gh(
+                ["api", f"repos/{repo}/git/refs/heads/{branch_name}", "--method", "DELETE"],
+                check=False,
+            )
             attempt = retry_counts.get(issue_number, 0)
             gov.record_429(attempt)
             retry_counts[issue_number] = attempt + 1
@@ -1832,10 +1864,15 @@ def _run_research_worker(
             session.save(checkpoint, checkpoint_path)
 
         elif result.is_error:
-            # Other error: increment retry count, unclaim for retry
+            # Other error: increment retry count, unclaim for retry.
+            # Delete the remote branch so the resume logic starts clean on retry.
             current_retries = retry_counts.get(issue_number, 0) + 1
             retry_counts[issue_number] = current_retries
             _unclaim_issue(repo=repo, issue_number=issue_number)
+            _gh(
+                ["api", f"repos/{repo}/git/refs/heads/{branch_name}", "--method", "DELETE"],
+                check=False,
+            )
 
             if current_retries >= MAX_RETRIES:
                 logger.log_conductor_event(
@@ -2676,23 +2713,26 @@ def _triage_review_comments(
     )
 
 
-def _create_worktree(branch: str, repo_root: str) -> str | None:
+def _create_worktree(
+    branch: str, repo_root: str, default_branch: str = "main"
+) -> str | None:
     """Create a git worktree for *branch* under ``.claude/worktrees/``.
 
-    The branch is created from ``origin/main`` and pushed to the remote.
+    The branch is created from ``origin/<default_branch>`` and pushed to the remote.
 
     Args:
-        branch:    Branch name (e.g. ``"42-add-config"``).
-        repo_root: Absolute path to the repository root.
+        branch:         Branch name (e.g. ``"42-add-config"``).
+        repo_root:      Absolute path to the repository root.
+        default_branch: Name of the default branch to base the new branch on.
 
     Returns:
         Absolute path to the new worktree directory, or ``None`` on failure.
     """
     worktree_dir = os.path.join(repo_root, ".claude", "worktrees", branch)
 
-    # Create worktree with new branch based on origin/main
+    # Create worktree with new branch based on origin/<default_branch>
     result = subprocess.run(
-        ["git", "worktree", "add", worktree_dir, "-b", branch, "origin/main"],
+        ["git", "worktree", "add", worktree_dir, "-b", branch, f"origin/{default_branch}"],
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -3424,7 +3464,7 @@ def _run_design_worker(
         hld_branch = f"{hld_number}-{_slugify(hld_issue_title)}"
 
         _claim_issue(repo=repo, issue_number=hld_number)
-        worktree_path = _create_worktree(hld_branch, repo_root)
+        worktree_path = _create_worktree(hld_branch, repo_root, default_branch)
         if worktree_path is None:
             _unclaim_issue(repo=repo, issue_number=hld_number)
             click.echo(f"Error: Failed to create worktree for branch {hld_branch!r}.", err=True)
@@ -3545,7 +3585,7 @@ def _run_design_worker(
             issue_number = issue["number"]
             branch = f"{issue_number}-{_slugify(issue['title'])}"
             _claim_issue(repo=repo, issue_number=issue_number)
-            worktree_path = _create_worktree(branch, repo_root)
+            worktree_path = _create_worktree(branch, repo_root, default_branch)
             if worktree_path is None:
                 _unclaim_issue(repo=repo, issue_number=issue_number)
                 click.echo(
