@@ -3203,6 +3203,24 @@ def _run_plan_milestones(
     )
 
     env = build_subprocess_env(config)
+
+    if dry_run:
+        # Sanity-check: confirm claude itself is reachable with this env.
+        _ver = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if _ver.returncode != 0 or not _ver.stdout.strip():
+            click.echo(
+                f"Warning: 'claude --version' failed "
+                f"(rc={_ver.returncode}, stdout={_ver.stdout!r}, stderr={_ver.stderr!r})",
+                err=True,
+            )
+        else:
+            click.echo(f"  claude version: {_ver.stdout.strip()}", err=True)
+
     result = runner.run(
         prompt=prompt,
         allowed_tools=["Bash", "Read", "Glob", "Grep"],
@@ -3238,8 +3256,8 @@ def _run_plan_milestones(
         raise SystemExit(1)
     elif result.subtype == "missing_result_event":
         click.echo(
-            "Warning: agent subprocess exited without producing any output "
-            "(exit 0, no stream-json events). subtype=missing_result_event",
+            f"Warning: agent subprocess exited without producing any output "
+            f"(exit_code={result.exit_code}, no stream-json events).",
             err=True,
         )
         if result.stderr:
