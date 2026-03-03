@@ -893,19 +893,15 @@ def _milestone_exists(repo: str, title: str) -> bool:
     return any(ms.get("title") == title for ms in milestones)
 
 
-def _find_next_research_milestone(repo: str, current_milestone: str) -> str | None:
-    """Find the next research milestone beyond *current_milestone*.
-
-    Queries ``gh milestone list`` and returns the title of the lowest-numbered
-    milestone whose title contains ``Research`` (case-insensitive) and whose
-    number is greater than the current milestone's number.
+def _find_next_milestone(repo: str, current_milestone: str) -> str | None:
+    """Find the next open milestone beyond *current_milestone* (by milestone number).
 
     Args:
         repo:               Repository in ``owner/repo`` format.
-        current_milestone:  Title of the current research milestone.
+        current_milestone:  Title of the current milestone.
 
     Returns:
-        Title of the next research milestone, or ``None`` if none exists.
+        Title of the next open milestone, or ``None`` if none exists.
     """
     result = _gh(
         ["milestone", "list", "--json", "title,number,state", "--limit", "100"],
@@ -929,56 +925,17 @@ def _find_next_research_milestone(repo: str, current_milestone: str) -> str | No
     if current_number is None:
         return None
 
-    # Find the next open Research milestone
-    research_milestones = [
+    # Find the next open milestone by number
+    candidates = [
         ms
         for ms in milestones
-        if "research" in (ms.get("title") or "").lower()
-        and ms.get("state", "").lower() == "open"
-        and ms.get("number", 0) > current_number
+        if ms.get("state", "").lower() == "open" and ms.get("number", 0) > current_number
     ]
-    if not research_milestones:
+    if not candidates:
         return None
 
-    research_milestones.sort(key=lambda m: m.get("number", 0))
-    return research_milestones[0].get("title")
-
-
-def _find_impl_milestone(repo: str, research_milestone: str) -> str | None:
-    """Find the implementation milestone that corresponds to *research_milestone*.
-
-    Heuristic: look for the open milestone whose title contains ``Impl``
-    (case-insensitive) and shares a version token with *research_milestone*.
-
-    Args:
-        repo:               Repository in ``owner/repo`` format.
-        research_milestone: Title of the research milestone.
-
-    Returns:
-        Title of the matching implementation milestone, or ``None``.
-    """
-    result = _gh(
-        ["milestone", "list", "--json", "title,number,state", "--limit", "100"],
-        repo=repo,
-        check=False,
-    )
-    if result.returncode != 0:
-        return None
-    try:
-        milestones: list[dict] = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
-
-    # Derive a version token from the research milestone title:
-    # e.g. "MVP Research" → "MVP", "v1.1 Research" → "v1.1"
-    version_token = research_milestone.lower().replace("research", "").strip()
-
-    for ms in milestones:
-        title_lower = (ms.get("title") or "").lower()
-        if "impl" in title_lower and version_token in title_lower:
-            return ms.get("title")
-
-    return None
+    candidates.sort(key=lambda m: m.get("number", 0))
+    return candidates[0].get("title")
 
 
 def _migrate_issue_to_milestone(repo: str, issue_number: int, milestone: str) -> None:
@@ -1000,15 +957,13 @@ def _file_pipeline_issue(
     repo: str,
     next_worker: str,
     milestone: str,
-    impl_milestone: str | None = None,
 ) -> None:
     """Create the next pipeline stage tracking issue.
 
     Args:
-        repo:            Repository in ``owner/repo`` format.
-        next_worker:     Name of the next worker stage (e.g. ``"design-worker"``).
-        milestone:       Research milestone that just completed (used in the issue title).
-        impl_milestone:  Implementation milestone to assign the new issue to (optional).
+        repo:        Repository in ``owner/repo`` format.
+        next_worker: Name of the next worker stage (e.g. ``"design-worker"``).
+        milestone:   Milestone that just completed (used in the title and assignment).
     """
     title = f"Run {next_worker} for {milestone}"
     cmd = [
@@ -1020,9 +975,9 @@ def _file_pipeline_issue(
         "pipeline",
         "--body",
         f"Pipeline stage transition: {next_worker} is ready to run for {milestone}.",
+        "--milestone",
+        milestone,
     ]
-    if impl_milestone:
-        cmd += ["--milestone", impl_milestone]
     _gh(cmd, repo=repo, check=False)
 
 
@@ -1318,7 +1273,7 @@ def _run_research_worker(
     # Pre-check: the milestone must exist before we can do anything useful.
     if not dry_run and not _milestone_exists(repo, milestone):
         click.echo(
-            f"Error: Research milestone '{milestone}' does not exist on GitHub. "
+            f"Error: Milestone '{milestone}' does not exist on GitHub. "
             "Did plan-milestones complete successfully?",
             err=True,
         )
@@ -1606,20 +1561,15 @@ def _run_completion_gate(
     """
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
 
-    # Migrate non-blocking issues to next research milestone
-    next_research_ms = _find_next_research_milestone(repo, milestone)
+    # Migrate non-blocking issues to the next milestone
+    next_ms = _find_next_milestone(repo, milestone)
     for issue in open_issues:
         issue_number = issue["number"]
         if dry_run:
-            click.echo(
-                f"[dry-run] Would migrate #{issue_number} to "
-                f"{next_research_ms or 'next research milestone'}"
-            )
+            click.echo(f"[dry-run] Would migrate #{issue_number} to {next_ms or 'next milestone'}")
         else:
-            if next_research_ms:
-                _migrate_issue_to_milestone(
-                    repo=repo, issue_number=issue_number, milestone=next_research_ms
-                )
+            if next_ms:
+                _migrate_issue_to_milestone(repo=repo, issue_number=issue_number, milestone=next_ms)
 
     # Log stage_complete
     logger.log_conductor_event(
@@ -1629,13 +1579,10 @@ def _run_completion_gate(
         payload={
             "milestone": milestone,
             "non_blocking_migrated": len(open_issues),
-            "next_research_milestone": next_research_ms,
+            "next_milestone": next_ms,
         },
         log_dir=config.log_dir.expanduser(),
     )
-
-    # Find the implementation milestone for the pipeline issue
-    impl_milestone = _find_impl_milestone(repo, milestone)
 
     # File pipeline issue: Run design-worker for <milestone>
     if dry_run:
@@ -1645,7 +1592,6 @@ def _run_completion_gate(
             repo=repo,
             next_worker="design-worker",
             milestone=milestone,
-            impl_milestone=impl_milestone,
         )
 
     session.save(checkpoint, checkpoint_path)
@@ -2796,7 +2742,7 @@ def _run_impl_worker(
 
 def _run_design_worker(
     repo: str,
-    research_milestone: str,
+    milestone: str,
     config: Config,
     checkpoint: Checkpoint,
     dry_run: bool = False,
@@ -2809,11 +2755,11 @@ def _run_design_worker(
     issue, and posting a Notion report.
 
     Args:
-        repo:               GitHub repository in ``owner/repo`` format.
-        research_milestone: Name of the completed research milestone.
-        config:             Validated Config instance.
-        checkpoint:         Active Checkpoint instance.
-        dry_run:            If True, print the prompt length without executing.
+        repo:       GitHub repository in ``owner/repo`` format.
+        milestone:  Active milestone name.
+        config:     Validated Config instance.
+        checkpoint: Active Checkpoint instance.
+        dry_run:    If True, print the prompt length without executing.
     """
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
     today = date.today().isoformat()
@@ -2821,10 +2767,10 @@ def _run_design_worker(
     base_prompt = (
         f"## Session Parameters\n"
         f"- Repository: {repo}\n"
-        f"- Research Milestone: {research_milestone}\n"
+        f"- Milestone: {milestone}\n"
         f"- Session Date: {today}\n\n"
         f"You are the design-worker for the `{repo}` repository.\n"
-        f"Translate the completed research docs for milestone `{research_milestone}` "
+        f"Translate the completed research docs for milestone `{milestone}` "
         f"into HLD and LLD design documents following the skill instructions below."
     )
     prompt = inject_skill("design-worker", base_prompt)
@@ -2832,7 +2778,7 @@ def _run_design_worker(
     if dry_run:
         click.echo(
             f"[dry-run] Would dispatch design-worker agent for milestone "
-            f"{research_milestone!r} in repo {repo!r}"
+            f"{milestone!r} in repo {repo!r}"
         )
         click.echo(f"[dry-run] Prompt length: {len(prompt)} chars")
         return
@@ -2841,7 +2787,7 @@ def _run_design_worker(
         run_id=checkpoint.run_id,
         phase="dispatch",
         event_type="design_worker_start",
-        payload={"repo": repo, "research_milestone": research_milestone},
+        payload={"repo": repo, "milestone": milestone},
         log_dir=config.log_dir.expanduser(),
     )
 
@@ -2861,7 +2807,7 @@ def _run_design_worker(
         event_type="design_worker_complete",
         payload={
             "repo": repo,
-            "research_milestone": research_milestone,
+            "milestone": milestone,
             "subtype": result.subtype,
             "is_error": result.is_error,
             "error_code": result.error_code,
@@ -2876,7 +2822,7 @@ def _run_design_worker(
             err=True,
         )
     else:
-        click.echo(f"Design-worker complete for research milestone '{research_milestone}'.")
+        click.echo(f"Design-worker complete for milestone '{milestone}'.")
 
 
 # ---------------------------------------------------------------------------
@@ -2886,7 +2832,7 @@ def _run_design_worker(
 
 def _run_plan_issues(
     repo: str,
-    impl_milestone: str,
+    milestone: str,
     config: Config,
     checkpoint: Checkpoint,
     dry_run: bool = False,
@@ -2899,11 +2845,11 @@ def _run_plan_issues(
     and a dependency graph, and posting a Notion report.
 
     Args:
-        repo:           GitHub repository in ``owner/repo`` format.
-        impl_milestone: Name of the implementation milestone to file issues against.
-        config:         Validated Config instance.
-        checkpoint:     Active Checkpoint instance.
-        dry_run:        If True, print the prompt length without executing.
+        repo:       GitHub repository in ``owner/repo`` format.
+        milestone:  Active milestone name to file issues against.
+        config:     Validated Config instance.
+        checkpoint: Active Checkpoint instance.
+        dry_run:    If True, print the prompt length without executing.
     """
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
     today = date.today().isoformat()
@@ -2911,12 +2857,12 @@ def _run_plan_issues(
     base_prompt = (
         f"## Session Parameters\n"
         f"- Repository: {repo}\n"
-        f"- Implementation Milestone: {impl_milestone}\n"
+        f"- Milestone: {milestone}\n"
         f"- Session Date: {today}\n"
         f"- Dry Run: {dry_run}\n\n"
         f"You are the plan-issues orchestrator for the `{repo}` repository.\n"
         f"Read the HLD and LLD design docs and file fully-specified `stage/impl` issues "
-        f"against milestone `{impl_milestone}` following the skill instructions below.\n"
+        f"against milestone `{milestone}` following the skill instructions below.\n"
         + (
             "\nThe `--dry-run` flag is set: print all planned issues but do NOT call "
             "`gh issue create`.\n"
@@ -2929,7 +2875,7 @@ def _run_plan_issues(
     if dry_run:
         click.echo(
             f"[dry-run] Would dispatch plan-issues agent for milestone "
-            f"{impl_milestone!r} in repo {repo!r}"
+            f"{milestone!r} in repo {repo!r}"
         )
         click.echo(f"[dry-run] Prompt length: {len(prompt)} chars")
         return
@@ -2938,7 +2884,7 @@ def _run_plan_issues(
         run_id=checkpoint.run_id,
         phase="dispatch",
         event_type="plan_issues_start",
-        payload={"repo": repo, "impl_milestone": impl_milestone},
+        payload={"repo": repo, "milestone": milestone},
         log_dir=config.log_dir.expanduser(),
     )
 
@@ -2958,7 +2904,7 @@ def _run_plan_issues(
         event_type="plan_issues_complete",
         payload={
             "repo": repo,
-            "impl_milestone": impl_milestone,
+            "milestone": milestone,
             "subtype": result.subtype,
             "is_error": result.is_error,
             "error_code": result.error_code,
@@ -2973,7 +2919,7 @@ def _run_plan_issues(
             err=True,
         )
     else:
-        click.echo(f"Plan-issues complete for implementation milestone '{impl_milestone}'.")
+        click.echo(f"Plan-issues complete for milestone '{milestone}'.")
 
 
 # ---------------------------------------------------------------------------
@@ -3110,6 +3056,59 @@ def _run_initialize(
     click.echo(f"initialize: repo={repo_ref!r} version={version!r} ready.")
 
 
+def _report_plan_milestones_output(repo: str, milestone: str) -> None:
+    """Print the milestone and research issues that plan-milestones created."""
+    # Fetch the milestone description
+    ms_result = _gh(
+        ["milestone", "list", "--json", "title,description", "--limit", "100"],
+        repo=repo,
+        check=False,
+    )
+    if ms_result.returncode == 0:
+        try:
+            milestones = json.loads(ms_result.stdout)
+            for ms in milestones:
+                if ms.get("title") == milestone:
+                    desc = ms.get("description", "")
+                    click.echo(f"\nMilestone created: {milestone}")
+                    if desc:
+                        click.echo(f"  {desc}")
+                    break
+        except json.JSONDecodeError:
+            pass
+
+    # Fetch research issues in this milestone
+    issues_result = _gh(
+        [
+            "issue",
+            "list",
+            "--milestone",
+            milestone,
+            "--label",
+            "research",
+            "--state",
+            "open",
+            "--json",
+            "number,title",
+            "--limit",
+            "50",
+        ],
+        repo=repo,
+        check=False,
+    )
+    if issues_result.returncode == 0:
+        try:
+            issues = json.loads(issues_result.stdout)
+            if issues:
+                click.echo(f"\nSeed research issues ({len(issues)}):")
+                for issue in issues:
+                    click.echo(f"  #{issue['number']}: {issue['title']}")
+            else:
+                click.echo("\nNo seed research issues were filed.")
+        except json.JSONDecodeError:
+            pass
+
+
 def _run_plan_milestones(
     repo: str,
     version: str,
@@ -3211,24 +3210,25 @@ def _run_plan_milestones(
     elif result.subtype == "missing_result_event":
         click.echo(
             "Warning: plan-milestones subprocess exited without a result event "
-            "(known Claude Code issue). Verifying milestones were created…",
+            "(known Claude Code issue). Verifying milestone was created…",
             err=True,
         )
+        if result.stderr:
+            click.echo(f"Subprocess stderr:\n{result.stderr[:2000]}", err=True)
     else:
         click.echo(f"Plan-milestones complete for version '{version}'.")
 
-    # Post-validation: confirm the milestone pair was actually created.
-    research_ms = f"{version} Research"
-    impl_ms = f"{version} Implementation"
-    missing = [ms for ms in (research_ms, impl_ms) if not _milestone_exists(repo, ms)]
-    if missing:
+    # Post-validation: confirm the milestone was actually created.
+    if not _milestone_exists(repo, version):
         click.echo(
-            f"Error: plan-milestones completed but milestone(s) were not created: "
-            f"{', '.join(repr(m) for m in missing)}\n"
+            f"Error: plan-milestones completed but milestone '{version}' was not created.\n"
             "The agent likely exited before finishing. Re-run to try again.",
             err=True,
         )
         raise SystemExit(1)
+
+    # Report what was created.
+    _report_plan_milestones_output(repo=repo, milestone=version)
 
 
 # ---------------------------------------------------------------------------
@@ -3361,14 +3361,12 @@ def research_worker(
         "or omit to operate on the current working directory."
     ),
 )
-@click.option(
-    "--research-milestone", required=True, help="Completed research milestone to translate"
-)
+@click.option("--milestone", required=True, help="Milestone to translate research docs for")
 @click.option("--model", default=None, help="Override Claude model")
 @click.option("--dry-run", is_flag=True, help="Print planned issues without creating them")
 def design_worker(
     repo: str | None,
-    research_milestone: str,
+    milestone: str,
     model: str | None,
     dry_run: bool,
 ) -> None:
@@ -3384,13 +3382,13 @@ def design_worker(
     _config, _checkpoint = startup_sequence(
         config=config,
         checkpoint_path=checkpoint_path,
-        milestone=research_milestone,
+        milestone=milestone,
         stage="design",
     )
 
     _run_design_worker(
         repo=repo_ref,
-        research_milestone=research_milestone,
+        milestone=milestone,
         config=_config,
         checkpoint=_checkpoint,
         dry_run=dry_run,
@@ -3407,14 +3405,12 @@ def design_worker(
         "or omit to operate on the current working directory."
     ),
 )
-@click.option(
-    "--impl-milestone", required=True, help="Implementation milestone to file issues against"
-)
+@click.option("--milestone", required=True, help="Milestone to file impl issues against")
 @click.option("--model", default=None, help="Override Claude model")
 @click.option("--dry-run", is_flag=True, help="Print planned milestones without creating them")
 def plan_issues(
     repo: str | None,
-    impl_milestone: str,
+    milestone: str,
     model: str | None,
     dry_run: bool,
 ) -> None:
@@ -3430,13 +3426,13 @@ def plan_issues(
     _config, _checkpoint = startup_sequence(
         config=config,
         checkpoint_path=checkpoint_path,
-        milestone=impl_milestone,
+        milestone=milestone,
         stage="plan-issues",
     )
 
     _run_plan_issues(
         repo=repo_ref,
-        impl_milestone=impl_milestone,
+        milestone=milestone,
         config=_config,
         checkpoint=_checkpoint,
         dry_run=dry_run,
@@ -3521,6 +3517,7 @@ def plan_milestones(
         version=version,
         config=_config,
         checkpoint=_checkpoint,
+        local_path=local_path,
         dry_run=dry_run,
     )
 
@@ -3629,8 +3626,7 @@ def _run_pipeline_stage(
     config = load_config(**overrides)
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
 
-    research_milestone = f"{version} Research"
-    impl_milestone = f"{version} Implementation"
+    milestone = version
 
     if stage == "initialize":
         _run_initialize(
@@ -3661,12 +3657,12 @@ def _run_pipeline_stage(
         _config, _checkpoint = startup_sequence(
             config=config,
             checkpoint_path=checkpoint_path,
-            milestone=research_milestone,
+            milestone=milestone,
             stage="research",
         )
         _run_research_worker(
             repo=repo_ref,
-            milestone=research_milestone,
+            milestone=milestone,
             config=_config,
             checkpoint=_checkpoint,
             dry_run=dry_run,
@@ -3676,12 +3672,12 @@ def _run_pipeline_stage(
         _config, _checkpoint = startup_sequence(
             config=config,
             checkpoint_path=checkpoint_path,
-            milestone=research_milestone,
+            milestone=milestone,
             stage="design",
         )
         _run_design_worker(
             repo=repo_ref,
-            research_milestone=research_milestone,
+            milestone=milestone,
             config=_config,
             checkpoint=_checkpoint,
             dry_run=dry_run,
@@ -3691,12 +3687,12 @@ def _run_pipeline_stage(
         _config, _checkpoint = startup_sequence(
             config=config,
             checkpoint_path=checkpoint_path,
-            milestone=impl_milestone,
+            milestone=milestone,
             stage="plan-issues",
         )
         _run_plan_issues(
             repo=repo_ref,
-            impl_milestone=impl_milestone,
+            milestone=milestone,
             config=_config,
             checkpoint=_checkpoint,
             dry_run=dry_run,
@@ -3706,12 +3702,12 @@ def _run_pipeline_stage(
         _config, _checkpoint = startup_sequence(
             config=config,
             checkpoint_path=checkpoint_path,
-            milestone=impl_milestone,
+            milestone=milestone,
             stage="impl",
         )
         _run_impl_worker(
             repo=repo_ref,
-            milestone=impl_milestone,
+            milestone=milestone,
             config=_config,
             checkpoint=_checkpoint,
             dry_run=dry_run,

@@ -21,8 +21,7 @@ from composer.cli import (
     _apply_triage_rubric,
     _classify_blocking_issues,
     _filter_unblocked,
-    _find_impl_milestone,
-    _find_next_research_milestone,
+    _find_next_milestone,
     _list_open_research_issues,
     _list_triage_issues,
     _parse_dependencies,
@@ -592,60 +591,34 @@ class TestClassifyBlockingIssues:
 
 
 # ---------------------------------------------------------------------------
-# _find_next_research_milestone
+# _find_next_milestone
 # ---------------------------------------------------------------------------
 
 
-class TestFindNextResearchMilestone:
-    def test_finds_next_research_milestone(self) -> None:
+class TestFindNextMilestone:
+    def test_finds_next_milestone_by_number(self) -> None:
         milestones = [
-            {"title": "MVP Research", "number": 1, "state": "open"},
-            {"title": "v1.1 Research", "number": 3, "state": "open"},
-            {"title": "MVP Implementation", "number": 2, "state": "open"},
+            {"title": "v1", "number": 1, "state": "open"},
+            {"title": "v2", "number": 2, "state": "open"},
+            {"title": "v3", "number": 3, "state": "open"},
         ]
         gh_out = make_gh_result(stdout=json.dumps(milestones))
         with patch("composer.cli.subprocess.run", return_value=gh_out):
-            result = _find_next_research_milestone("owner/repo", "MVP Research")
-        assert result == "v1.1 Research"
+            result = _find_next_milestone("owner/repo", "v1")
+        assert result == "v2"
 
-    def test_returns_none_if_no_next_research_milestone(self) -> None:
+    def test_returns_none_if_no_next_milestone(self) -> None:
         milestones = [
-            {"title": "MVP Research", "number": 1, "state": "open"},
+            {"title": "v1", "number": 1, "state": "open"},
         ]
         gh_out = make_gh_result(stdout=json.dumps(milestones))
         with patch("composer.cli.subprocess.run", return_value=gh_out):
-            result = _find_next_research_milestone("owner/repo", "MVP Research")
+            result = _find_next_milestone("owner/repo", "v1")
         assert result is None
 
     def test_returns_none_on_gh_failure(self) -> None:
         with patch("composer.cli.subprocess.run", return_value=make_gh_result(returncode=1)):
-            result = _find_next_research_milestone("owner/repo", "MVP Research")
-        assert result is None
-
-
-# ---------------------------------------------------------------------------
-# _find_impl_milestone
-# ---------------------------------------------------------------------------
-
-
-class TestFindImplMilestone:
-    def test_finds_matching_impl_milestone(self) -> None:
-        milestones = [
-            {"title": "MVP Research", "number": 1, "state": "open"},
-            {"title": "MVP Implementation", "number": 2, "state": "open"},
-        ]
-        gh_out = make_gh_result(stdout=json.dumps(milestones))
-        with patch("composer.cli.subprocess.run", return_value=gh_out):
-            result = _find_impl_milestone("owner/repo", "MVP Research")
-        assert result == "MVP Implementation"
-
-    def test_returns_none_if_no_matching_impl(self) -> None:
-        milestones = [
-            {"title": "MVP Research", "number": 1, "state": "open"},
-        ]
-        gh_out = make_gh_result(stdout=json.dumps(milestones))
-        with patch("composer.cli.subprocess.run", return_value=gh_out):
-            result = _find_impl_milestone("owner/repo", "MVP Research")
+            result = _find_next_milestone("owner/repo", "v1")
         assert result is None
 
 
@@ -664,8 +637,7 @@ class TestRunCompletionGate:
         non_blocking = [make_issue(5), make_issue(6)]
 
         with (
-            patch("composer.cli._find_next_research_milestone", return_value="v1.1 Research"),
-            patch("composer.cli._find_impl_milestone", return_value="MVP Implementation"),
+            patch("composer.cli._find_next_milestone", return_value="v2"),
             patch("composer.cli._migrate_issue_to_milestone") as mock_migrate,
             patch("composer.cli._file_pipeline_issue"),
             patch("composer.cli.logger.log_conductor_event"),
@@ -673,15 +645,15 @@ class TestRunCompletionGate:
         ):
             _run_completion_gate(
                 repo="owner/repo",
-                milestone="MVP Research",
+                milestone="v1",
                 open_issues=non_blocking,
                 config=config,
                 checkpoint=checkpoint,
             )
 
         assert mock_migrate.call_count == 2
-        mock_migrate.assert_any_call(repo="owner/repo", issue_number=5, milestone="v1.1 Research")
-        mock_migrate.assert_any_call(repo="owner/repo", issue_number=6, milestone="v1.1 Research")
+        mock_migrate.assert_any_call(repo="owner/repo", issue_number=5, milestone="v2")
+        mock_migrate.assert_any_call(repo="owner/repo", issue_number=6, milestone="v2")
 
     def test_files_pipeline_issue(self, tmp_path: Path) -> None:
         """A 'Run design-worker for <milestone>' pipeline issue is created."""
@@ -691,8 +663,7 @@ class TestRunCompletionGate:
         checkpoint = make_checkpoint()
 
         with (
-            patch("composer.cli._find_next_research_milestone", return_value="v1.1 Research"),
-            patch("composer.cli._find_impl_milestone", return_value="MVP Implementation"),
+            patch("composer.cli._find_next_milestone", return_value="v2"),
             patch("composer.cli._migrate_issue_to_milestone"),
             patch("composer.cli._file_pipeline_issue") as mock_file,
             patch("composer.cli.logger.log_conductor_event"),
@@ -700,7 +671,7 @@ class TestRunCompletionGate:
         ):
             _run_completion_gate(
                 repo="owner/repo",
-                milestone="MVP Research",
+                milestone="v1",
                 open_issues=[],
                 config=config,
                 checkpoint=checkpoint,
@@ -709,8 +680,7 @@ class TestRunCompletionGate:
         mock_file.assert_called_once_with(
             repo="owner/repo",
             next_worker="design-worker",
-            milestone="MVP Research",
-            impl_milestone="MVP Implementation",
+            milestone="v1",
         )
 
     def test_logs_stage_complete(self, tmp_path: Path) -> None:
@@ -721,8 +691,7 @@ class TestRunCompletionGate:
         checkpoint = make_checkpoint()
 
         with (
-            patch("composer.cli._find_next_research_milestone", return_value=None),
-            patch("composer.cli._find_impl_milestone", return_value=None),
+            patch("composer.cli._find_next_milestone", return_value=None),
             patch("composer.cli._migrate_issue_to_milestone"),
             patch("composer.cli._file_pipeline_issue"),
             patch("composer.cli.logger.log_conductor_event") as mock_log,
@@ -730,7 +699,7 @@ class TestRunCompletionGate:
         ):
             _run_completion_gate(
                 repo="owner/repo",
-                milestone="MVP Research",
+                milestone="v1",
                 open_issues=[],
                 config=config,
                 checkpoint=checkpoint,
@@ -747,8 +716,7 @@ class TestRunCompletionGate:
         checkpoint = make_checkpoint()
 
         with (
-            patch("composer.cli._find_next_research_milestone", return_value="v1.1 Research"),
-            patch("composer.cli._find_impl_milestone", return_value=None),
+            patch("composer.cli._find_next_milestone", return_value="v2"),
             patch("composer.cli._migrate_issue_to_milestone") as mock_migrate,
             patch("composer.cli._file_pipeline_issue") as mock_file,
             patch("composer.cli.logger.log_conductor_event"),
@@ -757,7 +725,7 @@ class TestRunCompletionGate:
         ):
             _run_completion_gate(
                 repo="owner/repo",
-                milestone="MVP Research",
+                milestone="v1",
                 open_issues=[make_issue(99)],
                 config=config,
                 checkpoint=checkpoint,

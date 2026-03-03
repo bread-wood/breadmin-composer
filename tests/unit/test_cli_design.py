@@ -7,8 +7,8 @@ Tests cover:
 - _run_plan_issues: dry-run prints prompt info without calling runner.run
 - _run_plan_issues: dispatches runner.run with correct tools and logs events
 - _run_plan_issues: handles runner error result gracefully
-- design_worker Click command: requires --repo and --research-milestone
-- plan_issues Click command: requires --repo and --impl-milestone
+- design_worker Click command: requires --repo and --milestone
+- plan_issues Click command: requires --repo and --milestone
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ class TestRunDesignWorker:
         ):
             _run_design_worker(
                 repo="owner/repo",
-                research_milestone="v1",
+                milestone="v1",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=True,
@@ -128,7 +128,7 @@ class TestRunDesignWorker:
         ):
             _run_design_worker(
                 repo="owner/repo",
-                research_milestone="v1",
+                milestone="v1",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=False,
@@ -164,7 +164,7 @@ class TestRunDesignWorker:
         ):
             _run_design_worker(
                 repo="owner/repo",
-                research_milestone="v1",
+                milestone="v1",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=False,
@@ -190,7 +190,7 @@ class TestRunDesignWorker:
         ):
             _run_design_worker(
                 repo="owner/repo",
-                research_milestone="v1",
+                milestone="v1",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=False,
@@ -216,7 +216,7 @@ class TestRunDesignWorker:
         ):
             _run_design_worker(
                 repo="owner/repo",
-                research_milestone="v1",
+                milestone="v1",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=False,
@@ -243,7 +243,7 @@ class TestRunPlanIssues:
         ):
             _run_plan_issues(
                 repo="owner/repo",
-                impl_milestone="v1",
+                milestone="v1",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=True,
@@ -268,7 +268,7 @@ class TestRunPlanIssues:
         ):
             _run_plan_issues(
                 repo="owner/repo",
-                impl_milestone="v1",
+                milestone="v1",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=False,
@@ -286,7 +286,7 @@ class TestRunPlanIssues:
         assert "Write" not in allowed_tools
         assert "Edit" not in allowed_tools
 
-    def test_prompt_includes_impl_milestone_and_repo(self, tmp_path: Path) -> None:
+    def test_prompt_includes_milestone_and_repo(self, tmp_path: Path) -> None:
         config = make_config(tmp_path)
         checkpoint = make_checkpoint(stage="plan-issues")
         run_result = make_run_result()
@@ -304,7 +304,7 @@ class TestRunPlanIssues:
         ):
             _run_plan_issues(
                 repo="owner/repo",
-                impl_milestone="v1-impl",
+                milestone="v1-impl",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=False,
@@ -339,7 +339,7 @@ class TestRunPlanIssues:
         ):
             _run_plan_issues(
                 repo="owner/repo",
-                impl_milestone="v1",
+                milestone="v1",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=True,
@@ -366,7 +366,7 @@ class TestRunPlanIssues:
         ):
             _run_plan_issues(
                 repo="owner/repo",
-                impl_milestone="v1",
+                milestone="v1",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=False,
@@ -392,7 +392,7 @@ class TestRunPlanIssues:
         ):
             _run_plan_issues(
                 repo="owner/repo",
-                impl_milestone="v1",
+                milestone="v1",
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=False,
@@ -412,15 +412,15 @@ class TestDesignWorkerCommand:
         """design-worker without --repo fails when cwd is not a git repo."""
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            result = runner.invoke(composer, ["design-worker", "--research-milestone", "v1"])
+            result = runner.invoke(composer, ["design-worker", "--milestone", "v1"])
         assert result.exit_code != 0
         assert "not a git repository" in result.output or "Error" in result.output
 
-    def test_missing_research_milestone_fails(self) -> None:
+    def test_missing_milestone_fails(self) -> None:
         runner = CliRunner()
         result = runner.invoke(composer, ["design-worker", "--repo", "owner/repo"])
         assert result.exit_code != 0
-        assert "Missing option" in result.output or "research-milestone" in result.output
+        assert "Missing option" in result.output or "milestone" in result.output
 
     def test_dry_run_exits_cleanly(self, tmp_path: Path) -> None:
         """design-worker --dry-run should print and exit 0."""
@@ -442,7 +442,7 @@ class TestDesignWorkerCommand:
                     "design-worker",
                     "--repo",
                     "owner/repo",
-                    "--research-milestone",
+                    "--milestone",
                     "v1",
                     "--dry-run",
                 ],
@@ -453,7 +453,7 @@ class TestDesignWorkerCommand:
         call_kwargs = mock_run.call_args.kwargs
         assert call_kwargs["dry_run"] is True
         assert call_kwargs["repo"] == "owner/repo"
-        assert call_kwargs["research_milestone"] == "v1"
+        assert call_kwargs["milestone"] == "v1"
 
 
 # ---------------------------------------------------------------------------
@@ -466,15 +466,15 @@ class TestPlanIssuesCommand:
         """plan-issues without --repo fails when cwd is not a git repo."""
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            result = runner.invoke(composer, ["plan-issues", "--impl-milestone", "v1"])
+            result = runner.invoke(composer, ["plan-issues", "--milestone", "v1"])
         assert result.exit_code != 0
         assert "not a git repository" in result.output or "Error" in result.output
 
-    def test_missing_impl_milestone_fails(self) -> None:
+    def test_missing_milestone_fails(self) -> None:
         runner = CliRunner()
         result = runner.invoke(composer, ["plan-issues", "--repo", "owner/repo"])
         assert result.exit_code != 0
-        assert "Missing option" in result.output or "impl-milestone" in result.output
+        assert "Missing option" in result.output or "milestone" in result.output
 
     def test_dry_run_exits_cleanly(self, tmp_path: Path) -> None:
         """plan-issues --dry-run should print and exit 0."""
@@ -496,7 +496,7 @@ class TestPlanIssuesCommand:
                     "plan-issues",
                     "--repo",
                     "owner/repo",
-                    "--impl-milestone",
+                    "--milestone",
                     "v1",
                     "--dry-run",
                 ],
@@ -507,4 +507,4 @@ class TestPlanIssuesCommand:
         call_kwargs = mock_run.call_args.kwargs
         assert call_kwargs["dry_run"] is True
         assert call_kwargs["repo"] == "owner/repo"
-        assert call_kwargs["impl_milestone"] == "v1"
+        assert call_kwargs["milestone"] == "v1"

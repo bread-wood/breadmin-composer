@@ -109,8 +109,9 @@ Use the spec's **Scope**, **Constraints**, and **Success Criteria** sections to 
 version scope. Do not override or extend what the spec defines.
 
 **Version naming**: choose a meaningful identifier (MVP, v1.1, v2, etc.) — not M3/M4.
-The milestone titles must contain either "Research" or "Implementation" (or "Impl") so
-the pipeline workers can identify their type.
+The milestone title is the version name only (e.g. `v1`, `MVP`). Do NOT append "Research"
+or "Implementation" — all stages for a version share the same milestone; workers select
+work by `stage/*` label, not by milestone name.
 
 **Scope document** — write a brief version scope in your thinking before creating anything.
 This must mirror the spec — not re-derive it:
@@ -124,24 +125,22 @@ Seed research questions: <from spec Key Unknowns section — not invented>
 Constraints: <from spec Constraints section>
 ```
 
-### Step 3 — Create Milestones
+### Step 3 — Create Milestone
+
+Create a single milestone for the version. All issues (research, design, impl) for this
+version will live under this milestone; workers distinguish their work by `stage/*` label.
 
 ```bash
-# Research milestone
 gh api repos/<owner>/<repo>/milestones \
-  -f title="<Version> Research" \
-  -f description="<one-line goal for the research phase>"
-
-# Implementation milestone
-gh api repos/<owner>/<repo>/milestones \
-  -f title="<Version> Implementation" \
-  -f description="<one-line goal for the implementation phase>"
+  -f title="<Version>" \
+  -f description="<one-line goal for this version>"
 ```
 
 ### Step 4 — File Seed Research Issues
 
-File seed research issues for the new research milestone. Source the research questions
-**directly from the spec's Key Unknowns section** — do not invent questions.
+File seed research issues in the new milestone with label `research` and `stage/research`.
+Source the research questions **directly from the spec's Key Unknowns section** — do not
+invent questions.
 
 Apply the `[BLOCKS_IMPL]` filter: only file an issue if not knowing the answer would block
 implementation. A Key Unknown in the spec that is answerable in 10 seconds or that does not
@@ -154,7 +153,7 @@ gh issue create \
   --repo <owner>/<repo> \
   --title "Research: <question>" \
   --label "research" \
-  --milestone "<Version> Research" \
+  --milestone "<Version>" \
   --body "$(cat <<'EOF'
 ## Background
 <Why this question matters for implementation>
