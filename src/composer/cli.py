@@ -1447,7 +1447,6 @@ def _run_research_worker(
                 "Grep",
                 "WebSearch",
                 "WebFetch",
-                "mcp__notion__API-post-page",
             ],
             env=env,
             max_turns=100,
@@ -2793,15 +2792,7 @@ def _run_design_worker(
     env = build_subprocess_env(config)
     result = runner.run(
         prompt=prompt,
-        allowed_tools=[
-            "Bash",
-            "Read",
-            "Edit",
-            "Write",
-            "Glob",
-            "Grep",
-            "mcp__notion__API-post-page",
-        ],
+        allowed_tools=["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
         env=env,
         max_turns=200,
     )
@@ -2896,13 +2887,7 @@ def _run_plan_issues(
     env = build_subprocess_env(config)
     result = runner.run(
         prompt=prompt,
-        allowed_tools=[
-            "Bash",
-            "Read",
-            "Glob",
-            "Grep",
-            "mcp__notion__API-post-page",
-        ],
+        allowed_tools=["Bash", "Read", "Glob", "Grep"],
         env=env,
         max_turns=200,
     )
@@ -3067,13 +3052,7 @@ def _run_plan_milestones(
     env = build_subprocess_env(config)
     result = runner.run(
         prompt=prompt,
-        allowed_tools=[
-            "Bash",
-            "Read",
-            "Glob",
-            "Grep",
-            "mcp__notion__API-post-page",
-        ],
+        allowed_tools=["Bash", "Read", "Glob", "Grep"],
         env=env,
         max_turns=200,
     )

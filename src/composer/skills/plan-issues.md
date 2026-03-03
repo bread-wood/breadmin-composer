@@ -193,15 +193,6 @@ gh issue create \
   --milestone "<impl-milestone>"
 ```
 
-### Step 7 — Post Notion Report
-
-Post a session report under "CC Autonomous Coding Sessions"
-(parent page ID: `317bb275-6a02-803d-a59f-dc56c3527942`) using
-`mcp__notion__API-post-page` with:
-- **Title**: `Plan-Issues Session — {YYYY-MM-DD} — {repo name}`
-- **Body**: impl milestone targeted, issues filed (with titles and labels), execution order,
-  any gaps noted, final verdict
-
 ## Constraints
 
 - **GitHub issues only** — plan-issues creates GitHub issues only; never touches source files,
@@ -215,5 +206,4 @@ Post a session report under "CC Autonomous Coding Sessions"
 - **`--dry-run` prints, does not create** — if `--dry-run` is set, print all planned issues
   to stdout and stop without calling `gh issue create`
 - **Verify no circular deps** before finalizing the issue set
-- **Post session report to Notion** when done
 - **File the pipeline tracking issue** `Run impl-worker for <impl-milestone>` when done
