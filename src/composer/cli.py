@@ -877,6 +877,22 @@ def _keep_triage_issue(repo: str, issue_number: int, milestone: str) -> None:
     )
 
 
+def _milestone_exists(repo: str, title: str) -> bool:
+    """Return True if an open milestone with *title* exists in *repo*."""
+    result = _gh(
+        ["milestone", "list", "--json", "title", "--limit", "100"],
+        repo=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    try:
+        milestones: list[dict] = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False
+    return any(ms.get("title") == title for ms in milestones)
+
+
 def _find_next_research_milestone(repo: str, current_milestone: str) -> str | None:
     """Find the next research milestone beyond *current_milestone*.
 
@@ -1298,6 +1314,15 @@ def _run_research_worker(
     stall_count: int = 0
 
     today = date.today().isoformat()
+
+    # Pre-check: the milestone must exist before we can do anything useful.
+    if not dry_run and not _milestone_exists(repo, milestone):
+        click.echo(
+            f"Error: Research milestone '{milestone}' does not exist on GitHub. "
+            "Did plan-milestones complete successfully?",
+            err=True,
+        )
+        raise SystemExit(1)
 
     while True:
         # ------------------------------------------------------------------
@@ -3175,11 +3200,24 @@ def _run_plan_milestones(
     elif result.subtype == "missing_result_event":
         click.echo(
             "Warning: plan-milestones subprocess exited without a result event "
-            "(known Claude Code issue). Work likely completed; continuing.",
+            "(known Claude Code issue). Verifying milestones were created…",
             err=True,
         )
     else:
         click.echo(f"Plan-milestones complete for version '{version}'.")
+
+    # Post-validation: confirm the milestone pair was actually created.
+    research_ms = f"{version} Research"
+    impl_ms = f"{version} Implementation"
+    missing = [ms for ms in (research_ms, impl_ms) if not _milestone_exists(repo, ms)]
+    if missing:
+        click.echo(
+            f"Error: plan-milestones completed but milestone(s) were not created: "
+            f"{', '.join(repr(m) for m in missing)}\n"
+            "The agent likely exited before finishing. Re-run to try again.",
+            err=True,
+        )
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------

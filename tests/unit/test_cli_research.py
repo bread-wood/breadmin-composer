@@ -14,6 +14,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from composer.cli import (
     UsageGovernor,
     _apply_triage_rubric,
@@ -33,6 +35,18 @@ from composer.cli import (
 from composer.config import Config
 from composer.runner import RunResult
 from composer.session import Checkpoint
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def mock_milestone_exists():
+    """Patch _milestone_exists to return True so tests don't hit GitHub."""
+    with patch("composer.cli._milestone_exists", return_value=True):
+        yield
+
 
 # ---------------------------------------------------------------------------
 # Helpers
