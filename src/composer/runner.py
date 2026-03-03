@@ -130,7 +130,7 @@ def run(
     append_system_prompt_file: Path | None = None,
     mcp_config: Path | None = None,
     verbose: bool = True,
-    print_text_output: bool = False,
+    print_text_output: bool = True,
     timeout_seconds: float | None = None,
     model: str | None = None,
 ) -> RunResult:
@@ -387,7 +387,7 @@ def _print_progress(event: dict, print_text_output: bool = False) -> None:
 def _parse_stream(
     proc: subprocess.Popen,
     verbose: bool = True,
-    print_text_output: bool = False,
+    print_text_output: bool = True,
     timeout_seconds: float | None = None,
 ) -> tuple[dict | None, list[dict], str, bool, bool]:
     """Read stream-json events from proc.stdout until EOF or timeout.
