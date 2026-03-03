@@ -60,6 +60,7 @@ def startup_sequence(
     milestone: str = "",
     stage: str = "",
     resume_run_id: str | None = None,
+    skip_checks: frozenset[str] = frozenset(),
 ) -> tuple[Config, Checkpoint]:
     """Shared startup sequence run by every worker before entering its main loop.
 
@@ -78,6 +79,8 @@ def startup_sequence(
         milestone:        Active milestone name (forwarded to session.new).
         stage:            Pipeline stage (forwarded to session.new).
         resume_run_id:    If provided, validate the checkpoint run_id matches.
+        skip_checks:      Health check names to skip (for headless commands that
+                          target a remote repo and don't require a local git cwd).
 
     Returns:
         A (Config, Checkpoint) tuple ready for the worker loop.
@@ -99,7 +102,7 @@ def startup_sequence(
         )
 
     # Step 2: Health checks
-    report = health.check_all(config)
+    report = health.check_all(config, skip_checks=skip_checks)
     if report.fatal:
         click.echo(health.format_report(report))
         raise FatalHealthCheckError("Fatal health check failure — see report above.")
@@ -3144,6 +3147,20 @@ def _run_plan_milestones(
             f"  gh api repos/{repo}/contents/docs/specs/{version}.md --jq '.content' | base64 -d"
         )
 
+    dry_run_instruction = (
+        "\n\n## DRY-RUN MODE\n"
+        "Do NOT create any GitHub milestones or issues. Do NOT run any `gh` write commands.\n"
+        "Instead, output the complete plan to stdout:\n"
+        "1. The milestone you would create (title and description)\n"
+        "2. Every research issue you would file (title, rationale, research areas, "
+        "acceptance criteria, dependencies)\n"
+        "3. Suggested dispatch order\n"
+        "You MAY read the spec and use read-only `gh` commands to check existing state.\n"
+        "Format the output clearly so a human can review and approve before a real run."
+        if dry_run
+        else ""
+    )
+
     base_prompt = (
         f"## Session Parameters\n"
         f"- Repository: {repo}\n"
@@ -3152,18 +3169,17 @@ def _run_plan_milestones(
         f"You are the plan-milestones orchestrator for the `{repo}` repository.\n"
         f"You are running in a headless temp directory (not inside the repo checkout).\n"
         f"{spec_read_instruction}\n"
-        f"Then create the milestone pair and file seed research issues"
+        f"Then create the milestone and file research issues"
         f" following the skill instructions below."
+        f"{dry_run_instruction}"
     )
     prompt = inject_skill("plan-milestones", base_prompt)
 
     if dry_run:
         click.echo(
-            f"[dry-run] Would dispatch plan-milestones agent for version "
-            f"{version!r} in repo {repo!r}"
+            f"[dry-run] Dispatching plan-milestones agent for version "
+            f"{version!r} in repo {repo!r} (read-only — no GitHub writes)\n"
         )
-        click.echo(f"[dry-run] Prompt length: {len(prompt)} chars")
-        return
 
     logger.log_conductor_event(
         run_id=checkpoint.run_id,
@@ -3208,15 +3224,21 @@ def _run_plan_milestones(
             click.echo(f"stderr:\n{result.stderr[:2000]}", err=True)
         raise SystemExit(1)
     elif result.subtype == "missing_result_event":
-        click.echo(
-            "Warning: plan-milestones subprocess exited without a result event "
-            "(known Claude Code issue). Verifying milestone was created…",
-            err=True,
-        )
-        if result.stderr:
-            click.echo(f"Subprocess stderr:\n{result.stderr[:2000]}", err=True)
+        if not dry_run:
+            click.echo(
+                "Warning: plan-milestones subprocess exited without a result event "
+                "(known Claude Code issue). Verifying milestone was created…",
+                err=True,
+            )
+            if result.stderr:
+                click.echo(f"Subprocess stderr:\n{result.stderr[:2000]}", err=True)
     else:
-        click.echo(f"Plan-milestones complete for version '{version}'.")
+        if not dry_run:
+            click.echo(f"Plan-milestones complete for version '{version}'.")
+
+    if dry_run:
+        # In dry-run the agent outputs its plan to stdout but creates nothing.
+        return
 
     # Post-validation: confirm the milestone was actually created.
     if not _milestone_exists(repo, version):
@@ -3496,11 +3518,22 @@ def plan_milestones(
     config = load_config(**overrides)
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
 
+    # plan-milestones targets a remote repo; the cwd need not be a git repo.
+    _HEADLESS_SKIP = frozenset(
+        {
+            "Git repo present",
+            "Default branch matches config",
+            "No stale in-progress issues",
+            "Open PRs needing attention",
+            "No active worktrees",
+        }
+    )
     _config, _checkpoint = startup_sequence(
         config=config,
         checkpoint_path=checkpoint_path,
         milestone=version,
         stage="plan-milestones",
+        skip_checks=_HEADLESS_SKIP,
     )
 
     # Seed the spec into the target repo before running plan-milestones

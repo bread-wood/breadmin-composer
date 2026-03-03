@@ -69,6 +69,7 @@ class HealthReport:
 def check_all(
     config: Config,
     checkpoint: Checkpoint | None = None,
+    skip_checks: frozenset[str] = frozenset(),
 ) -> HealthReport:
     """Run all 11 preflight checks in order.
 
@@ -77,8 +78,10 @@ def check_all(
     Sets fatal=True if any check is "fail".
 
     Args:
-        config:     Resolved Config instance.
-        checkpoint: Current Checkpoint object, or None if no checkpoint yet.
+        config:       Resolved Config instance.
+        checkpoint:   Current Checkpoint object, or None if no checkpoint yet.
+        skip_checks:  Set of check names to skip entirely (e.g. checks that are
+                      irrelevant for headless commands targeting a remote repo).
 
     Returns:
         A HealthReport with all check results.
@@ -101,7 +104,16 @@ def check_all(
     failed = False
 
     for name, fn in named_checks:
-        if failed:
+        if name in skip_checks:
+            results.append(
+                CheckResult(
+                    name=name,
+                    status="skip",
+                    message="Not applicable for this command.",
+                    remediation=None,
+                )
+            )
+        elif failed:
             results.append(
                 CheckResult(
                     name=name,
