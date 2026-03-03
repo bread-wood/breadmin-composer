@@ -20,6 +20,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 import uuid
 from datetime import date
@@ -3205,13 +3206,9 @@ def _run_plan_milestones(
     env = build_subprocess_env(config)
 
     if dry_run:
-        # Sanity-check: confirm claude itself is reachable with this env.
-        _ver = subprocess.run(
-            ["claude", "--version"],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        # Confirm claude is reachable, then run a minimal probe to check that
+        # --output-format stream-json works with our flags.
+        _ver = subprocess.run(["claude", "--version"], capture_output=True, text=True, env=env)
         if _ver.returncode != 0 or not _ver.stdout.strip():
             click.echo(
                 f"Warning: 'claude --version' failed "
@@ -3220,6 +3217,43 @@ def _run_plan_milestones(
             )
         else:
             click.echo(f"  claude version: {_ver.stdout.strip()}", err=True)
+
+        # Minimal stream-json probe — same flags as the real invocation but
+        # with a trivial 1-turn prompt so we can see if any events come back.
+        _probe_cmd = [
+            "claude",
+            "-p",
+            "Reply with the single word: OK",
+            "--output-format",
+            "stream-json",
+            "--allowedTools",
+            "Bash",
+            "--max-turns",
+            "1",
+            "--dangerously-skip-permissions",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{}",
+        ]
+        _probe = subprocess.run(
+            _probe_cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=tempfile.gettempdir(),
+        )
+        click.echo(
+            f"  probe rc={_probe.returncode} "
+            f"stdout_bytes={len(_probe.stdout)} "
+            f"stderr_bytes={len(_probe.stderr)}",
+            err=True,
+        )
+        if _probe.stdout:
+            click.echo(f"  probe stdout (first 500): {_probe.stdout[:500]!r}", err=True)
+        if _probe.stderr:
+            click.echo(f"  probe stderr (first 500): {_probe.stderr[:500]!r}", err=True)
 
     result = runner.run(
         prompt=prompt,
@@ -3240,7 +3274,9 @@ def _run_plan_milestones(
             "subtype": result.subtype,
             "is_error": result.is_error,
             "error_code": result.error_code,
+            "exit_code": result.exit_code,
             "stderr": result.stderr[:2000] if result.stderr else "",
+            "dry_run": dry_run,
         },
         log_dir=config.log_dir.expanduser(),
     )
