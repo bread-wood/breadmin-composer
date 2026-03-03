@@ -126,6 +126,7 @@ def run(
     max_turns: int = 100,
     append_system_prompt_file: Path | None = None,
     mcp_config: Path | None = None,
+    verbose: bool = True,
 ) -> RunResult:
     """Invoke ``claude -p`` as a subprocess and return a structured result.
 
@@ -154,6 +155,9 @@ def run(
     mcp_config:
         If provided, pass ``--mcp-config <path>``. If None, runner passes
         ``--strict-mcp-config --mcp-config '{}'`` to suppress all MCP servers.
+    verbose:
+        If True (default), print tool invocations and brief output to stderr
+        as they occur so the operator can see progress in real time.
 
     Returns
     -------
@@ -195,6 +199,9 @@ def run(
             overage_detected=False,
         )
 
+    if verbose:
+        print("  (first response may take a few minutes…)", file=sys.stderr, flush=True)
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -203,7 +210,7 @@ def run(
         text=False,  # binary mode; we decode manually
     )
 
-    result_event, all_events, stderr_text, overage_detected = _parse_stream(proc)
+    result_event, all_events, stderr_text, overage_detected = _parse_stream(proc, verbose=verbose)
     proc.wait()
     exit_code = proc.returncode
 
@@ -276,8 +283,68 @@ def _assemble_command(
 # ---------------------------------------------------------------------------
 
 
+def _print_progress(event: dict) -> None:
+    """Print a one-line terminal summary of a stream-json event to stderr.
+
+    Shows tool invocations (assistant → tool_use blocks) and brief tool
+    output (user → tool_result blocks) so the operator can see what Claude
+    is doing without waiting for the full session to complete.
+    """
+    event_type = event.get("type")
+
+    if event_type == "assistant":
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return
+        for block in message.get("content", []):
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name", "?")
+            inp = block.get("input") or {}
+            if name == "Bash":
+                detail = (inp.get("command") or "").split("\n")[0][:120]
+            elif name in ("Read", "Write", "Edit", "NotebookEdit"):
+                detail = inp.get("file_path", "")
+            elif name == "Glob":
+                detail = inp.get("pattern", "")
+            elif name == "Grep":
+                detail = inp.get("pattern", "")
+            else:
+                detail = str(inp)[:80]
+            print(f"  → {name}: {detail}", file=sys.stderr, flush=True)
+
+    elif event_type == "user":
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return
+        for block in message.get("content", []):
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            raw = block.get("content") or ""
+            if isinstance(raw, list):
+                text = next(
+                    (
+                        b.get("text", "")
+                        for b in raw
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ),
+                    "",
+                )
+            else:
+                text = str(raw)
+            lines = text.strip().splitlines()
+            n = len(lines)
+            if n == 0:
+                print("    (empty)", file=sys.stderr, flush=True)
+            elif n == 1:
+                print(f"    {lines[0][:120]}", file=sys.stderr, flush=True)
+            else:
+                print(f"    {lines[0][:100]}  (+{n - 1} lines)", file=sys.stderr, flush=True)
+
+
 def _parse_stream(
     proc: subprocess.Popen,
+    verbose: bool = True,
 ) -> tuple[dict | None, list[dict], str, bool]:
     """Read stream-json events from proc.stdout until EOF.
 
@@ -347,6 +414,8 @@ def _parse_stream(
                             continue
 
                         all_events.append(event)
+                        if verbose:
+                            _print_progress(event)
                         event_type = event.get("type")
 
                         if event_type == "result":
