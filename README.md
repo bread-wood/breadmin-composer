@@ -2,7 +2,7 @@
 
 Headless Claude Code orchestrator for automated GitHub issue workstreams.
 
-Runs a multi-stage pipeline (research → design → scoping → implementation → QA → release)
+Runs a multi-stage pipeline (plan → research → design → scoping → implementation)
 against a target GitHub repo by invoking `claude -p` headlessly. Each stage dispatches
 sub-agents in parallel, monitors their output, and merges results back to the default branch.
 
@@ -21,10 +21,10 @@ Requires Python 3.11+ and the following tools on `$PATH`:
 ## Pipeline
 
 ```
-spec → init → plan → research → design → scoping → implementation → qa → release
+spec → init → plan → research → design → scoping → implementation
 ```
 
-No stage may be skipped. Each stage is triggered via `brimstone run --<stage>`.
+Each stage is triggered via `brimstone run --<stage>`.
 See `CLAUDE.md` for the full orchestration protocol.
 
 ## Commands
