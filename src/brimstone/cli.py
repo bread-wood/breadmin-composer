@@ -5208,6 +5208,19 @@ def _run_plan(
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
     today = date.today().isoformat()
 
+    # Skip plan if research issues already exist — plan already ran for this milestone.
+    if not dry_run:
+        try:
+            existing = _count_open_issues_by_label(repo, version, RESEARCH_LABEL)
+            if existing > 0:
+                click.echo(
+                    f"[plan] {existing} open research issue(s) already exist for {version!r}"
+                    " — plan stage skipped (already seeded)."
+                )
+                return
+        except Exception:
+            pass  # If the check fails, fall through and let the agent run normally
+
     # Skip plan if design is already underway (HLD merged → research issues
     # seeded in a prior run; re-filing them would block design with new research).
     if not dry_run:
