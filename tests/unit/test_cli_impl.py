@@ -931,7 +931,10 @@ class TestRunImplWorkerClaiming:
                 checkpoint=checkpoint,
             )
 
-        mock_claim.assert_called_once_with(repo="owner/repo", issue_number=10)
+        mock_claim.assert_called_once()
+        call_kwargs = mock_claim.call_args.kwargs
+        assert call_kwargs.get("repo") == "owner/repo"
+        assert call_kwargs.get("issue_number") == 10
 
     def test_dry_run_does_not_create_worktrees(self, tmp_path: Path) -> None:
         """In dry-run mode, _create_worktree is never called."""
@@ -1012,7 +1015,10 @@ class TestRunImplWorkerRateLimitHandling:
                 checkpoint=checkpoint,
             )
 
-        mock_unclaim.assert_called_with(repo="owner/repo", issue_number=10)
+        mock_unclaim.assert_called()
+        call_kwargs = mock_unclaim.call_args.kwargs
+        assert call_kwargs.get("repo") == "owner/repo"
+        assert call_kwargs.get("issue_number") == 10
 
 
 # ---------------------------------------------------------------------------

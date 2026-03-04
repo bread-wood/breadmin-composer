@@ -297,7 +297,7 @@ class TestStartupSequence:
             patch("brimstone.cli.logger.log_conductor_event"),
             patch("brimstone.cli.click.echo") as mock_echo,
         ):
-            _cfg, _chk = startup_sequence(
+            _cfg, _chk, _store = startup_sequence(
                 config=config,
                 checkpoint_path=checkpoint_path,
                 milestone="MVP",
@@ -357,7 +357,7 @@ class TestStartupSequence:
             patch("brimstone.cli.health.acquire_orchestrator_lock"),
             patch("brimstone.cli.logger.log_conductor_event"),
         ):
-            _cfg, chk = startup_sequence(
+            _cfg, chk, _store = startup_sequence(
                 config=config,
                 checkpoint_path=checkpoint_path,
                 milestone="MVP Research",
@@ -389,7 +389,7 @@ class TestStartupSequence:
             patch("brimstone.cli.health.acquire_orchestrator_lock"),
             patch("brimstone.cli.logger.log_conductor_event"),
         ):
-            _cfg, chk = startup_sequence(
+            _cfg, chk, _store = startup_sequence(
                 config=config,
                 checkpoint_path=checkpoint_path,
                 milestone="MVP Research",

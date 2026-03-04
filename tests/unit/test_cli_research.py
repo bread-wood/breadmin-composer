@@ -620,7 +620,10 @@ class TestRunResearchWorkerIssueSelection:
                 checkpoint=checkpoint,
             )
 
-        mock_claim.assert_called_once_with(repo="owner/repo", issue_number=1)
+        mock_claim.assert_called_once()
+        call_kwargs = mock_claim.call_args.kwargs
+        assert call_kwargs.get("repo") == "owner/repo"
+        assert call_kwargs.get("issue_number") == 1
 
     def test_monitors_pr_after_success(self, tmp_path: Path) -> None:
         """After a successful run, PR monitoring should be called."""
@@ -729,7 +732,10 @@ class TestRunResearchWorkerRateLimit:
             )
 
         # Issue should have been unclaimed after the rate-limited result
-        mock_unclaim.assert_called_with(repo="owner/repo", issue_number=1)
+        mock_unclaim.assert_called()
+        call_kwargs = mock_unclaim.call_args.kwargs
+        assert call_kwargs.get("repo") == "owner/repo"
+        assert call_kwargs.get("issue_number") == 1
 
     def test_record_429_called_on_rate_limit(self, tmp_path: Path) -> None:
         """UsageGovernor.record_429 must be called when rate-limited."""
@@ -1052,7 +1058,7 @@ class TestResumeUnclaim:
             ),
             patch(
                 "brimstone.cli._unclaim_issue",
-                side_effect=lambda repo, num: unclaim_calls.append(num),
+                side_effect=lambda repo, issue_number, **kw: unclaim_calls.append(issue_number),
             ),
             # After resume, return no open issues so the main loop exits
             patch("brimstone.cli._list_open_issues_by_label", return_value=[]),
@@ -1089,7 +1095,7 @@ class TestResumeUnclaim:
             patch("brimstone.cli._find_pr_for_issue", return_value=None),
             patch(
                 "brimstone.cli._unclaim_issue",
-                side_effect=lambda repo, num: unclaim_calls.append(num),
+                side_effect=lambda repo, issue_number, **kw: unclaim_calls.append(issue_number),
             ),
             patch(
                 "brimstone.cli._monitor_pr",
@@ -1143,7 +1149,7 @@ class TestResumeUnclaim:
             ),
             patch(
                 "brimstone.cli._unclaim_issue",
-                side_effect=lambda repo, num: unclaim_calls.append(num),
+                side_effect=lambda repo, issue_number, **kw: unclaim_calls.append(issue_number),
             ),
             patch("brimstone.cli._list_open_issues_by_label", return_value=[]),
             patch("brimstone.cli._run_completion_gate"),

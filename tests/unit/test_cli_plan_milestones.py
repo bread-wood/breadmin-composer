@@ -148,7 +148,7 @@ class TestInitCommand:
             mock_config = MagicMock()
             mock_config.checkpoint_dir = tmp_path
             mock_load_config.return_value = mock_config
-            mock_startup.return_value = (mock_config, MagicMock())
+            mock_startup.return_value = (mock_config, MagicMock(), MagicMock())
 
             result = runner.invoke(composer, ["init", "owner/repo"])
 
@@ -172,7 +172,7 @@ class TestInitCommand:
             mock_config = MagicMock()
             mock_config.checkpoint_dir = tmp_path
             mock_load_config.return_value = mock_config
-            mock_startup.return_value = (mock_config, MagicMock())
+            mock_startup.return_value = (mock_config, MagicMock(), MagicMock())
 
             result = runner.invoke(composer, ["init", "owner/repo", "--dry-run"])
 
@@ -233,7 +233,7 @@ class TestRunPlanCommand:
             mock_config = MagicMock()
             mock_config.checkpoint_dir = tmp_path
             mock_load_config.return_value = mock_config
-            mock_startup.return_value = (mock_config, MagicMock())
+            mock_startup.return_value = (mock_config, MagicMock(), MagicMock())
             mock_run.return_value = None
 
             result = runner.invoke(
@@ -277,7 +277,7 @@ class TestRunPlanCommand:
             mock_config = MagicMock()
             mock_config.checkpoint_dir = tmp_path
             mock_load_config.return_value = mock_config
-            mock_startup.return_value = (mock_config, MagicMock())
+            mock_startup.return_value = (mock_config, MagicMock(), MagicMock())
 
             result = runner.invoke(
                 composer,
@@ -321,7 +321,7 @@ class TestRunPlanCommand:
             mock_config = MagicMock()
             mock_config.checkpoint_dir = tmp_path
             mock_load_config.return_value = mock_config
-            mock_startup.return_value = (mock_config, MagicMock())
+            mock_startup.return_value = (mock_config, MagicMock(), MagicMock())
 
             result = runner.invoke(
                 composer,
