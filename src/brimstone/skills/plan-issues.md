@@ -188,16 +188,6 @@ Print a full summary to stdout:
   research or design issues — do NOT auto-file them)
 - **Verdict**: "Ready for impl-worker — N issues filed, dependency graph complete."
 
-### Step 6 — File Next Pipeline Issue
-
-```bash
-gh issue create \
-  --repo <owner>/<repo> \
-  --title "implementation: <milestone>" \
-  --label "pipeline" \
-  --milestone "<milestone>"
-```
-
 ## Constraints
 
 - **GitHub issues only** — plan-issues creates GitHub issues only; never touches source files,
