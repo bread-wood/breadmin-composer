@@ -72,6 +72,7 @@ class TestImplWorkerDefaultBranch:
             patch("brimstone.cli._claim_issue"),
             patch("brimstone.cli._unclaim_issue"),
             patch("brimstone.cli._dispatch_impl_agent", side_effect=fake_dispatch),
+            patch("brimstone.cli._count_all_issues_by_label", return_value=1),
             patch("brimstone.cli._gh"),  # suppress completion gate gh call
         ):
             _run_impl_worker(
@@ -112,6 +113,7 @@ class TestImplWorkerLoopMechanics:
         with (
             patch("brimstone.cli._get_default_branch_for_repo", return_value="mainline"),
             patch("brimstone.cli._list_open_issues_by_label", return_value=[]),
+            patch("brimstone.cli._count_all_issues_by_label", return_value=1),
             patch("brimstone.cli._gh"),  # suppress pipeline issue creation
         ):
             # Should exit without error (not loop forever)
@@ -150,6 +152,7 @@ class TestImplWorkerLoopMechanics:
             patch("brimstone.cli._unclaim_issue", side_effect=fake_unclaim),
             # Force worktree creation to fail
             patch("brimstone.cli._create_worktree", return_value=None),
+            patch("brimstone.cli._count_all_issues_by_label", return_value=1),
             patch("brimstone.cli._gh"),
         ):
             _run_impl_worker(
@@ -204,6 +207,7 @@ class TestImplWorkerLoopMechanics:
             patch("brimstone.cli._claim_issue"),
             patch("brimstone.cli._unclaim_issue"),
             patch("brimstone.cli._dispatch_impl_agent", side_effect=fake_dispatch),
+            patch("brimstone.cli._count_all_issues_by_label", return_value=3),
             patch("brimstone.cli._gh"),
         ):
             _run_impl_worker(

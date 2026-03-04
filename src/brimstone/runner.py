@@ -351,8 +351,9 @@ def _assemble_command(
     if max_budget_usd is not None:
         cmd += ["--max-budget-usd", str(max_budget_usd)]
 
-    # Automatic retry with cheaper model on overload/rate-limit
-    if fallback_model:
+    # Automatic retry with cheaper model on overload/rate-limit.
+    # Skip if fallback equals primary — claude rejects identical model pairs.
+    if fallback_model and fallback_model != model:
         cmd += ["--fallback-model", fallback_model]
 
     return cmd

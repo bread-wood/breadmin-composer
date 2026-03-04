@@ -6,42 +6,22 @@ test requirements, and a verified dependency graph. It runs **after** design-wor
 all design docs and **before** impl-worker begins. It creates GitHub issues only — no code,
 no design docs, no source file changes.
 
-## Target Repository
-
-The `--repo` argument controls which repository this worker operates on:
-
-| Invocation | Behaviour |
-|---|---|
-| *(no flag)* | Operate on the current working directory. Fails if cwd is not a git repo. |
-| `--repo owner/name` | Operate on an existing remote GitHub repo. All `gh` commands use `--repo owner/name`. |
-| `--repo name` | Scaffold a new private GitHub repo named `name`, then operate on it. |
-| `--repo path/to/local/dir` | Operate on the local directory. Fails if it is not a git repo. |
-
-All `gh` commands in this skill must be scoped with `--repo <owner>/<name>` when the target is a remote repo.
-All `git` commands must be run with `-C <local_path>` (or inside the cloned directory) when operating on a local path.
-
 ## Setup
 
-1. Detect the default branch:
+The orchestrator has already cloned the repository to a local path specified in the
+`Local repo clone` session parameter. Use that path for all file reads.
+
+1. Read the project-level CLAUDE.md to understand module scope and labels:
    ```bash
-   DEFAULT_BRANCH=$(gh repo view --repo <owner>/<repo> --json defaultBranchRef --jq '.defaultBranchRef.name')
-   git -C <local_path> checkout $DEFAULT_BRANCH && git -C <local_path> pull origin $DEFAULT_BRANCH
+   cat <local_repo_clone>/CLAUDE.md
    ```
-
-2. Run startup checks per the Orchestrator-Dispatch Protocol in ~/.claude/CLAUDE.md.
-
-3. Read the project-level CLAUDE.md to understand module scope and labels.
 
 ## Inputs
 
 The scope worker requires:
-- `--repo` — the target repository (optional; defaults to cwd)
-- `--milestone` — the milestone to file impl issues against (e.g. `v0.1.0`)
-
-Verify the milestone exists:
-```bash
-gh milestone list --repo <owner>/<repo>
-```
+- `Repository` — the target repository in `owner/repo` format
+- `Milestone` — the milestone to file impl issues against (e.g. `v0.1.0`)
+- `Local repo clone` — absolute path to the pre-cloned repository
 
 ## Execution
 
@@ -50,20 +30,21 @@ gh milestone list --repo <owner>/<repo>
 **The design documents are the sole source of truth for scoping. Do not read research
 issues, design issues, or any other issue history when planning impl issues.**
 
-Design docs live under `docs/design/<milestone>/`:
+Design docs live under `<local_repo_clone>/docs/design/<milestone>/`.
+Read them directly from the local filesystem — do NOT use `gh api` to fetch them.
 
 Read the high-level design document:
 ```bash
-gh api repos/<owner>/<repo>/contents/docs/design/<milestone>/HLD.md -q '.content' | base64 -d
+cat <local_repo_clone>/docs/design/<milestone>/HLD.md
 ```
 
 List and read all low-level design documents:
 ```bash
-gh api repos/<owner>/<repo>/contents/docs/design/<milestone>/lld
+ls <local_repo_clone>/docs/design/<milestone>/lld/
 ```
 For each file in `docs/design/<milestone>/lld/`, read it in full:
 ```bash
-gh api repos/<owner>/<repo>/contents/docs/design/<milestone>/lld/<module>.md -q '.content' | base64 -d
+cat <local_repo_clone>/docs/design/<milestone>/lld/<module>.md
 ```
 
 Build a complete picture of:
@@ -162,14 +143,15 @@ Record each filed issue number for the dependency step.
 
 ### Step 4 — Set Dependency Order
 
-After all issues are filed, build a directed acyclic graph (DAG) from the "Depends on" fields.
+After all issues are filed, build a directed acyclic graph (DAG) from the dependency
+relationships you identified in Step 3. You now have the real issue numbers for every issue.
 
 Check for cycles:
 - If a cycle exists, identify the least critical dependency edge and remove it (update the
   affected issue body with a comment explaining the removal).
 - Cycles must be resolved before proceeding.
 
-Compute the topological execution order and print it:
+Compute the topological execution order:
 ```
 #N1 (no deps) -> #N2 (depends on #N1) -> #N3 (depends on #N1, #N2) -> ...
 ```
@@ -177,6 +159,20 @@ Compute the topological execution order and print it:
 If any issue has a dependency on an issue number that was not filed in this session
 (i.e., it references a pre-existing open issue), verify that issue is open and in the
 impl milestone. If it is closed or missing, remove the dependency and note the correction.
+
+**Wire up GitHub dependency links for every dependency relationship.**
+For each issue N that depends on issue M, update issue N's body to include the canonical
+`Depends on: #M` text in the Dependencies section, then confirm with:
+```bash
+gh issue edit <N> --body "$(cat <<'EOF'
+<full updated body with correct Depends on: #M line>
+EOF
+)" --repo <owner>/<repo>
+```
+
+Do this for every dependency edge in the DAG. brimstone's `_filter_unblocked` reads
+`Depends on: #N` from issue bodies to enforce execution order — if these lines are absent
+or contain wrong numbers, all issues will be dispatched in parallel regardless of order.
 
 ### Step 5 — Print Summary
 
