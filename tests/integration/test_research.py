@@ -147,7 +147,7 @@ class TestResearchWorkerHappyPath:
 
         call_order: list[str] = []
 
-        def fake_claim(repo: str, issue_number: int) -> None:
+        def fake_claim(repo: str, issue_number: int, **kwargs: object) -> None:
             call_order.append("claim")
 
         def fake_run(**kwargs: object) -> MagicMock:
@@ -303,7 +303,7 @@ class TestResearchWorkerErrorHandling:
 
         unclaimed: list[int] = []
 
-        def fake_unclaim(repo: str, issue_number: int) -> None:
+        def fake_unclaim(repo: str, issue_number: int, **kwargs: object) -> None:
             unclaimed.append(issue_number)
 
         call_count = [0]
@@ -347,7 +347,7 @@ class TestResearchWorkerErrorHandling:
 
         unclaimed: list[int] = []
 
-        def fake_unclaim(repo: str, issue_number: int) -> None:
+        def fake_unclaim(repo: str, issue_number: int, **kwargs: object) -> None:
             unclaimed.append(issue_number)
 
         with (
@@ -400,7 +400,7 @@ class TestResearchWorkerParallelDispatch:
             # Return an error so the completion handler calls _unclaim_issue
             return fake_run_result(is_error=True)
 
-        def fake_unclaim(repo: str, issue_number: int) -> None:
+        def fake_unclaim(repo: str, issue_number: int, **kwargs: object) -> None:
             with order_lock:
                 call_order.append("unclaim")
 

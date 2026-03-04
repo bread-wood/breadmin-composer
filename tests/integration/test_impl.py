@@ -139,7 +139,7 @@ class TestImplWorkerLoopMechanics:
             call_count[0] += 1
             return [issue] if call_count[0] <= 2 else []
 
-        def fake_unclaim(repo: str, issue_number: int) -> None:
+        def fake_unclaim(repo: str, issue_number: int, **kwargs: object) -> None:
             unclaimed.append(issue_number)
 
         with (

@@ -108,7 +108,10 @@ class TestRunMilestoneCheck:
                 patch("brimstone.cli._resolve_repo", return_value=_REPO),
                 patch("brimstone.cli._milestone_exists", return_value=True),
                 patch("brimstone.cli._count_open_issues_by_label", return_value=3),
-                patch("brimstone.cli.startup_sequence", return_value=(object(), object())),
+                patch(
+                    "brimstone.cli.startup_sequence",
+                    return_value=(object(), object(), object()),
+                ),
                 patch("brimstone.cli._run_research_worker"),
             ):
                 runner = CliRunner()
@@ -266,7 +269,7 @@ class TestRunGates:
                 patch("brimstone.cli._list_open_issues_by_label", return_value=[{"number": 1}]),
                 patch(
                     "brimstone.cli.startup_sequence",
-                    return_value=(object(), object()),
+                    return_value=(object(), object(), object()),
                 ),
                 patch(
                     "brimstone.cli._run_research_worker",
@@ -303,7 +306,10 @@ class TestRunGates:
                 patch("brimstone.cli._get_default_branch_for_repo", return_value="main"),
                 patch("brimstone.cli._count_open_issues_by_label", return_value=1),
                 patch("brimstone.cli._doc_exists_on_default_branch", return_value=False),
-                patch("brimstone.cli.startup_sequence", return_value=(object(), object())),
+                patch(
+                    "brimstone.cli.startup_sequence",
+                    return_value=(object(), object(), object()),
+                ),
                 patch(
                     "brimstone.cli._run_research_worker",
                     side_effect=lambda **kw: calls.append("research"),
@@ -348,7 +354,10 @@ class TestRunScopeStage:
                 patch("brimstone.cli._get_default_branch_for_repo", return_value="main"),
                 patch("brimstone.cli._doc_exists_on_default_branch", return_value=True),
                 patch("brimstone.cli._list_open_issues_by_label", return_value=[]),
-                patch("brimstone.cli.startup_sequence", return_value=(object(), object())),
+                patch(
+                    "brimstone.cli.startup_sequence",
+                    return_value=(object(), object(), object()),
+                ),
                 patch(
                     "brimstone.cli._run_plan_issues",
                     side_effect=lambda **kw: calls.append("plan-issues"),
@@ -392,7 +401,10 @@ class TestRunScopeStage:
                 patch("brimstone.cli._get_default_branch_for_repo", return_value="main"),
                 patch("brimstone.cli._doc_exists_on_default_branch", return_value=True),
                 patch("brimstone.cli._count_open_issues_by_label", return_value=2),
-                patch("brimstone.cli.startup_sequence", return_value=(object(), object())),
+                patch(
+                    "brimstone.cli.startup_sequence",
+                    return_value=(object(), object(), object()),
+                ),
                 patch(
                     "brimstone.cli._run_impl_worker",
                     side_effect=lambda **kw: calls.append("impl"),

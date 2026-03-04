@@ -45,12 +45,17 @@ def _fake_startup(
     resume_run_id: object = None,
 ) -> tuple:
     """Minimal startup_sequence replacement: skips health checks."""
+    from pathlib import Path as _Path
+
+    from brimstone.beads import BeadStore
+
     cfg = MagicMock()
     cfg.github_token = "ghp-test"
     cfg.log_dir = MagicMock()
-    cfg.log_dir.expanduser.return_value = Path("/tmp/brimstone-test-logs")
+    cfg.log_dir.expanduser.return_value = _Path("/tmp/brimstone-test-logs")
     chk = make_checkpoint(milestone=milestone, stage=stage)
-    return cfg, chk
+    store = BeadStore(beads_dir=_Path("/tmp/brimstone-test-beads"))
+    return cfg, chk, store
 
 
 _COMMON_PATCHES = {

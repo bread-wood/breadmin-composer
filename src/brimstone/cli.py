@@ -23,13 +23,14 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 import click
 
 from brimstone import health, logger, runner, session
+from brimstone.beads import BeadStore, WorkBead, make_bead_store
 from brimstone.config import (
     Config,
     build_subprocess_env,
@@ -68,7 +69,7 @@ def startup_sequence(
     stage: str = "",
     resume_run_id: str | None = None,
     skip_checks: frozenset[str] = frozenset(),
-) -> tuple[Config, Checkpoint]:
+) -> tuple[Config, Checkpoint, BeadStore]:
     """Shared startup sequence run by every worker before entering its main loop.
 
     Steps:
@@ -89,7 +90,7 @@ def startup_sequence(
                           target a remote repo and don't require a local git cwd).
 
     Returns:
-        A (Config, Checkpoint) tuple ready for the worker loop.
+        A (Config, Checkpoint, BeadStore) tuple ready for the worker loop.
 
     Raises:
         FatalHealthCheckError: If any health check is fatal.
@@ -139,8 +140,11 @@ def startup_sequence(
         log_dir=config.log_dir.expanduser(),
     )
 
+    # Step 7a: Create BeadStore
+    store = make_bead_store(config, config.github_repo or "")
+
     # Step 7: Return
-    return config, chk
+    return config, chk, store
 
 
 # ---------------------------------------------------------------------------
@@ -746,6 +750,7 @@ def _resume_stale_issues(
     checkpoint: Checkpoint,
     default_branch: str = "main",
     repo_root: str = "",
+    store: BeadStore | None = None,
 ) -> set[int]:
     """Resume or unclaim in-progress issues from a crashed previous session.
 
@@ -763,8 +768,22 @@ def _resume_stale_issues(
     Called at the start of research-worker, design-worker, and impl-worker.
     """
     handled: set[int] = set()
-    for stale in _list_in_progress_issues(repo, milestone, label):
-        stale_number: int = stale["number"]
+    if store is not None:
+        _LABEL_TO_STAGE = {
+            "stage/research": "research",
+            "stage/impl": "impl",
+            "stage/design": "design",
+        }
+        stage_name = _LABEL_TO_STAGE.get(label, "")
+        claimed_beads = [
+            b
+            for b in store.list_work_beads(state="claimed")
+            if b.milestone == milestone and (not stage_name or b.stage == stage_name)
+        ]
+        stale_iter: list[int] = [b.issue_number for b in claimed_beads]
+    else:
+        stale_iter = [stale["number"] for stale in _list_in_progress_issues(repo, milestone, label)]
+    for stale_number in stale_iter:
         found = _find_pr_for_issue(repo, stale_number)
         if found is not None:
             pr_number, stale_branch = found
@@ -798,7 +817,7 @@ def _resume_stale_issues(
             )
             handled.add(stale_number)
         else:
-            _unclaim_issue(repo, stale_number)
+            _unclaim_issue(repo=repo, issue_number=stale_number, store=store)
             click.echo(
                 f"{log_prefix} Unclaimed stale #{stale_number} (no open or merged PR found)",
                 err=True,
@@ -1175,13 +1194,40 @@ def _startup_dep_checks(open_issues: list[dict[str, Any]], repo: str) -> None:
         raise SystemExit(1)
 
 
-def _claim_issue(repo: str, issue_number: int) -> None:
+def _claim_issue(
+    repo: str,
+    issue_number: int,
+    issue: dict | None = None,
+    branch: str = "",
+    store: BeadStore | None = None,
+) -> None:
     """Add the bot assignee and ``in-progress`` label to a GitHub issue.
 
     Args:
         repo:         Repository in ``owner/repo`` format.
         issue_number: GitHub issue number.
+        issue:        Full issue dict (from GitHub API).  Required when *store* is set.
+        branch:       Branch name created for this issue.  Required when *store* is set.
+        store:        Active BeadStore instance.  When set, writes a WorkBead before
+                      the GitHub API call.
     """
+    if store is not None and issue is not None:
+        milestone_title = (issue.get("milestone") or {}).get("title", "")
+        bead = WorkBead(
+            v=1,
+            issue_number=issue_number,
+            title=issue.get("title", ""),
+            milestone=milestone_title,
+            stage=_extract_stage(issue),
+            module=_extract_module(issue),
+            priority=_extract_priority(issue),
+            state="claimed",
+            branch=branch,
+            retry_count=0,
+            claimed_at=datetime.now(UTC).isoformat(),
+        )
+        store.write_work_bead(bead)
+        store.flush(f"brimstone: claim #{issue_number}")
     _gh(
         [
             "issue",
@@ -1197,7 +1243,7 @@ def _claim_issue(repo: str, issue_number: int) -> None:
     )
 
 
-def _unclaim_issue(repo: str, issue_number: int) -> None:
+def _unclaim_issue(repo: str, issue_number: int, store: BeadStore | None = None) -> None:
     """Remove all assignees and the ``in-progress`` label from a GitHub issue.
 
     Fetches the current assignees so that legacy assignments (e.g. from a run
@@ -1206,7 +1252,14 @@ def _unclaim_issue(repo: str, issue_number: int) -> None:
     Args:
         repo:         Repository in ``owner/repo`` format.
         issue_number: GitHub issue number.
+        store:        Active BeadStore instance.  When set, updates the WorkBead
+                      state to ``"open"`` before the GitHub API call.
     """
+    if store is not None:
+        bead = store.read_work_bead(issue_number)
+        if bead is not None:
+            bead.state = "open"
+            store.write_work_bead(bead)
     info = _gh(
         ["issue", "view", str(issue_number), "--json", "assignees"],
         repo=repo,
@@ -1225,7 +1278,9 @@ def _unclaim_issue(repo: str, issue_number: int) -> None:
     _gh(args, repo=repo, check=False)
 
 
-def _exhaust_issue(repo: str, issue_number: int, reason: str) -> None:
+def _exhaust_issue(
+    repo: str, issue_number: int, reason: str, store: BeadStore | None = None
+) -> None:
     """Mark an issue as permanently exhausted after all retries are spent.
 
     Unclaims the issue, adds the ``bug`` label, leaves a comment with the
@@ -1236,7 +1291,15 @@ def _exhaust_issue(repo: str, issue_number: int, reason: str) -> None:
         repo:         Repository in ``owner/repo`` format.
         issue_number: GitHub issue number.
         reason:       Short failure description (e.g. subtype string).
+        store:        Active BeadStore instance.  When set, updates the WorkBead
+                      state to ``"abandoned"`` and flushes before the GitHub API calls.
     """
+    if store is not None:
+        bead = store.read_work_bead(issue_number)
+        if bead is not None:
+            bead.state = "abandoned"
+            store.write_work_bead(bead)
+            store.flush(f"brimstone: #{issue_number} abandoned — {reason}")
     _gh(
         [
             "issue",
@@ -1252,7 +1315,7 @@ def _exhaust_issue(repo: str, issue_number: int, reason: str) -> None:
         repo=repo,
         check=False,
     )
-    _unclaim_issue(repo=repo, issue_number=issue_number)
+    _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
     _gh(["issue", "edit", str(issue_number), "--add-label", "bug"], repo=repo, check=False)
     _gh(["issue", "close", str(issue_number)], repo=repo, check=False)
 
@@ -1468,6 +1531,7 @@ def _run_persistent_pool(
     when_empty_fn: Callable[[], bool],
     on_release: Callable[..., None] | None = None,
     stall_reason: str = "dep-blocked deadlock",
+    store: BeadStore | None = None,
 ) -> None:
     """Persistent pool loop shared by research-worker, impl-worker, and design-worker.
 
@@ -1500,7 +1564,8 @@ def _run_persistent_pool(
         stall_reason:  Human-readable reason logged on deadlock escalation.
     """
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
-    retry_counts: dict[int, int] = {}
+    # In-memory fallback retry tracker used when store is None.
+    _retry_counts: dict[int, int] = {}
     stall_count: int = 0
     active: dict = {}
 
@@ -1552,7 +1617,7 @@ def _run_persistent_pool(
                 )
                 if gov is not None:
                     gov.record_completion(1)
-                _unclaim_issue(repo=repo, issue_number=issue_number)
+                _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
                 _remove_worktree(_worktree_path, repo_root)
                 continue
 
@@ -1591,11 +1656,18 @@ def _run_persistent_pool(
                 result.error_code in ("rate_limit", "extra_usage_exhausted")
                 or result.subtype == "error_max_budget_usd"
             ):
-                _unclaim_issue(repo=repo, issue_number=issue_number)
+                _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
                 _delete_remote_branch(repo, _branch)
-                attempt = retry_counts.get(issue_number, 0)
+                _bead = store.read_work_bead(issue_number) if store is not None else None
+                attempt = (
+                    _bead.retry_count if _bead is not None else _retry_counts.get(issue_number, 0)
+                )
                 gov.record_429(attempt)
-                retry_counts[issue_number] = attempt + 1
+                if _bead is not None:
+                    _bead.retry_count = attempt + 1
+                    store.write_work_bead(_bead)  # type: ignore[union-attr]
+                else:
+                    _retry_counts[issue_number] = attempt + 1
                 logger.log_conductor_event(
                     run_id=checkpoint.run_id,
                     phase="backoff",
@@ -1612,12 +1684,19 @@ def _run_persistent_pool(
                 continue
 
             if result.is_error:
-                current_retries = retry_counts.get(issue_number, 0) + 1
-                retry_counts[issue_number] = current_retries
+                _bead = store.read_work_bead(issue_number) if store is not None else None
+                current_retries = (
+                    _bead.retry_count if _bead is not None else _retry_counts.get(issue_number, 0)
+                ) + 1
+                if _bead is not None:
+                    _bead.retry_count = current_retries
+                    store.write_work_bead(_bead)  # type: ignore[union-attr]
+                else:
+                    _retry_counts[issue_number] = current_retries
                 _delete_remote_branch(repo, _branch)
                 if current_retries >= MAX_RETRIES:
                     reason = result.subtype or "unknown_error"
-                    _exhaust_issue(repo, issue_number, reason)
+                    _exhaust_issue(repo, issue_number, reason, store)
                     click.echo(
                         f"[{stage}] #{issue_number} exhausted {MAX_RETRIES} retries "
                         f"({reason}) — closed with 'bug' label. Reopen to retry.",
@@ -1638,7 +1717,7 @@ def _run_persistent_pool(
                         log_dir=config.log_dir.expanduser(),
                     )
                 else:
-                    _unclaim_issue(repo=repo, issue_number=issue_number)
+                    _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
                 _remove_worktree(_worktree_path, repo_root)
                 session.save(checkpoint, checkpoint_path)
                 continue
@@ -1656,6 +1735,7 @@ def _run_research_worker(
     config: Config,
     checkpoint: Checkpoint,
     dry_run: bool = False,
+    store: BeadStore | None = None,
 ) -> None:
     """Main research-worker loop.
 
@@ -1704,6 +1784,7 @@ def _run_research_worker(
             checkpoint=checkpoint,
             default_branch=default_branch,
             repo_root=repo_root,
+            store=store,
         )
         _startup_dep_checks(_list_open_issues_by_label(repo, milestone, RESEARCH_LABEL), repo)
 
@@ -1765,7 +1846,13 @@ def _run_research_worker(
                     continue
                 slug = _slugify(issue.get("title", "")[:40])
                 branch_name = f"{issue_number}-{slug}"
-                _claim_issue(repo=repo, issue_number=issue_number)
+                _claim_issue(
+                    repo=repo,
+                    issue_number=issue_number,
+                    issue=issue,
+                    branch=branch_name,
+                    store=store,
+                )
                 session.save(checkpoint, checkpoint_path)
                 worktree_path = _create_worktree(branch_name, repo_root, default_branch)
                 if worktree_path is None:
@@ -1774,7 +1861,7 @@ def _run_research_worker(
                         f"(branch={branch_name!r}) — unclaiming",
                         err=True,
                     )
-                    _unclaim_issue(repo=repo, issue_number=issue_number)
+                    _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
                     continue
                 logger.log_conductor_event(
                     run_id=checkpoint.run_id,
@@ -1874,6 +1961,7 @@ def _run_research_worker(
                 "running. Manual intervention required to resolve the dependency cycle "
                 "or close/skip issues."
             ),
+            store=store,
         )
 
     if _clone_dir:
@@ -2065,6 +2153,27 @@ def _extract_module(issue: dict[str, Any]) -> str:
         if name.startswith(_FEAT_PREFIX):
             return name[len(_FEAT_PREFIX) :]
     return "none"
+
+
+def _extract_stage(issue: dict[str, Any]) -> str:
+    """Return the stage string from issue labels ('research', 'impl', 'design', or '')."""
+    labels = {lbl["name"] for lbl in issue.get("labels", [])}
+    if "stage/research" in labels:
+        return "research"
+    if "stage/impl" in labels:
+        return "impl"
+    if "stage/design" in labels:
+        return "design"
+    return ""
+
+
+def _extract_priority(issue: dict[str, Any]) -> str:
+    """Return the priority label from issue labels (defaults to 'P2')."""
+    labels = {lbl["name"] for lbl in issue.get("labels", [])}
+    for p in ("P0", "P1", "P2", "P3", "P4"):
+        if p in labels:
+            return p
+    return "P2"
 
 
 def _find_pr_for_branch(repo: str, branch: str) -> int | None:
@@ -3423,6 +3532,7 @@ def _run_impl_worker(
     config: Config,
     checkpoint: Checkpoint,
     dry_run: bool = False,
+    store: BeadStore | None = None,
 ) -> None:
     """Main impl-worker loop.
 
@@ -3459,6 +3569,7 @@ def _run_impl_worker(
             checkpoint=checkpoint,
             default_branch=default_branch,
             repo_root=repo_root,
+            store=store,
         )
         _resume_open_prs(
             repo=repo,
@@ -3514,10 +3625,16 @@ def _run_impl_worker(
                     continue
                 issue_title = issue.get("title", "")
                 branch = f"{issue_number}-{_slugify(issue_title)}"
-                _claim_issue(repo=repo, issue_number=issue_number)
+                _claim_issue(
+                    repo=repo,
+                    issue_number=issue_number,
+                    issue=issue,
+                    branch=branch,
+                    store=store,
+                )
                 worktree_path = _create_worktree(branch, repo_root, default_branch)
                 if worktree_path is None:
-                    _unclaim_issue(repo=repo, issue_number=issue_number)
+                    _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
                     logger.log_conductor_event(
                         run_id=checkpoint.run_id,
                         phase="claim",
@@ -3526,7 +3643,6 @@ def _run_impl_worker(
                         log_dir=config.log_dir.expanduser(),
                     )
                     continue
-                checkpoint.claimed_issues[str(issue_number)] = branch
                 session.save(checkpoint, checkpoint_path)
                 logger.log_conductor_event(
                     run_id=checkpoint.run_id,
@@ -3571,7 +3687,7 @@ def _run_impl_worker(
                     },
                     log_dir=config.log_dir.expanduser(),
                 )
-                _unclaim_issue(repo=repo, issue_number=issue_number)
+                _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
                 _remove_worktree(worktree_path, repo_root)
                 return
             checkpoint.open_prs[branch] = pr_number
@@ -3680,6 +3796,7 @@ def _run_impl_worker(
             when_empty_fn=_when_empty,
             on_release=_on_release,
             stall_reason="dep-blocked deadlock or all modules busy",
+            store=store,
         )
 
     if _clone_dir:
@@ -3697,6 +3814,7 @@ def _run_design_worker(
     config: Config,
     checkpoint: Checkpoint,
     dry_run: bool = False,
+    store: BeadStore | None = None,
 ) -> None:
     """Run the two-phase design-worker: HLD first, then LLD agents in parallel.
 
@@ -3753,6 +3871,7 @@ def _run_design_worker(
             checkpoint=checkpoint,
             default_branch=default_branch,
             repo_root=repo_root,
+            store=store,
         )
     else:
         _clone_dir = None
@@ -3808,10 +3927,16 @@ def _run_design_worker(
         hld_number = hld_issue["number"]
         hld_branch = f"{hld_number}-{_slugify(hld_issue_title)}"
 
-        _claim_issue(repo=repo, issue_number=hld_number)
+        _claim_issue(
+            repo=repo,
+            issue_number=hld_number,
+            issue=hld_issue,
+            branch=hld_branch,
+            store=store,
+        )
         worktree_path = _create_worktree(hld_branch, repo_root, default_branch)
         if worktree_path is None:
-            _unclaim_issue(repo=repo, issue_number=hld_number)
+            _unclaim_issue(repo=repo, issue_number=hld_number, store=store)
             click.echo(f"Error: Failed to create worktree for branch {hld_branch!r}.", err=True)
             raise SystemExit(1)
 
@@ -3847,7 +3972,7 @@ def _run_design_worker(
         )
 
         if hld_result.is_error:
-            _unclaim_issue(repo=repo, issue_number=hld_number)
+            _unclaim_issue(repo=repo, issue_number=hld_number, store=store)
             _remove_worktree(worktree_path, repo_root)
             click.echo(
                 f"HLD agent failed: {hld_result.subtype} / {hld_result.error_code}",
@@ -3857,7 +3982,7 @@ def _run_design_worker(
 
         pr_number = _find_pr_for_branch(repo, hld_branch)
         if pr_number is None:
-            _unclaim_issue(repo=repo, issue_number=hld_number)
+            _unclaim_issue(repo=repo, issue_number=hld_number, store=store)
             _remove_worktree(worktree_path, repo_root)
             click.echo("Error: HLD agent completed but no PR found.", err=True)
             raise SystemExit(1)
@@ -3951,10 +4076,16 @@ def _run_design_worker(
                         break
                     issue_number = issue["number"]
                     branch = f"{issue_number}-{_slugify(issue['title'])}"
-                    _claim_issue(repo=repo, issue_number=issue_number)
+                    _claim_issue(
+                        repo=repo,
+                        issue_number=issue_number,
+                        issue=issue,
+                        branch=branch,
+                        store=store,
+                    )
                     worktree_path = _create_worktree(branch, repo_root, default_branch)
                     if worktree_path is None:
-                        _unclaim_issue(repo=repo, issue_number=issue_number)
+                        _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
                         click.echo(
                             f"Warning: Failed to create worktree for {branch!r}"
                             f" — skipping LLD for {module!r}",
@@ -3984,7 +4115,7 @@ def _run_design_worker(
                         f"LLD agent for {module!r} succeeded but no PR found.",
                         err=True,
                     )
-                    _unclaim_issue(repo=repo, issue_number=issue_number)
+                    _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
                     _remove_worktree(worktree_path, repo_root)
                     return
                 merged = _monitor_pr(
@@ -3999,7 +4130,7 @@ def _run_design_worker(
                 )
                 _remove_worktree(worktree_path, repo_root)
                 if merged:
-                    _unclaim_issue(repo=repo, issue_number=issue_number)
+                    _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
                     click.echo(f"LLD for {module!r} merged (PR #{pr_number}).")
                 else:
                     click.echo(
@@ -4025,6 +4156,7 @@ def _run_design_worker(
                 fill_fn=_fill_lld,
                 on_success=_on_lld_success,
                 when_empty_fn=_when_lld_empty,
+                store=store,
             )
 
     session.save(checkpoint, checkpoint_path)
@@ -4820,7 +4952,7 @@ def cost() -> None:
     config = load_config()
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
     _chk = session.load(checkpoint_path)
-    _config, _checkpoint = startup_sequence(
+    _config, _checkpoint, _store = startup_sequence(
         config=config,
         checkpoint_path=checkpoint_path,
         milestone="",
@@ -5082,7 +5214,7 @@ def run(
                         err=True,
                     )
                     continue
-                _config, _checkpoint = startup_sequence(
+                _config, _checkpoint, _store = startup_sequence(
                     config=config,
                     checkpoint_path=checkpoint_path,
                     milestone=ms,
@@ -5130,7 +5262,7 @@ def run(
                     click.echo(f"[dry-run] would run {stage} for milestone={ms!r}", err=True)
                     continue
 
-                _config, _checkpoint = startup_sequence(
+                _config, _checkpoint, _store = startup_sequence(
                     config=config,
                     checkpoint_path=checkpoint_path,
                     milestone=ms,
@@ -5144,6 +5276,7 @@ def run(
                         config=_config,
                         checkpoint=_checkpoint,
                         dry_run=False,
+                        store=_store,
                     )
                 elif stage == "design":
                     _run_design_worker(
@@ -5152,6 +5285,7 @@ def run(
                         config=_config,
                         checkpoint=_checkpoint,
                         dry_run=False,
+                        store=_store,
                     )
                 elif stage == "scope":
                     _run_plan_issues(
@@ -5168,6 +5302,7 @@ def run(
                         config=_config,
                         checkpoint=_checkpoint,
                         dry_run=False,
+                        store=_store,
                     )
 
 
@@ -5210,7 +5345,7 @@ def init(
             "yeast-bot is repo collaborator",
         }
     )
-    _config, _checkpoint = startup_sequence(
+    _config, _checkpoint, _store = startup_sequence(
         config=config,
         checkpoint_path=checkpoint_path,
         milestone="",
