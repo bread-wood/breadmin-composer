@@ -172,4 +172,5 @@ def fake_run_result(*, is_error: bool = False) -> MagicMock:
     result.error_code = "unknown_error" if is_error else None
     result.exit_code = 1 if is_error else 0
     result.raw_result_event = None
+    result.stderr = None
     return result
