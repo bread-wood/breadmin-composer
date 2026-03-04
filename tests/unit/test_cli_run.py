@@ -261,6 +261,7 @@ class TestRunGates:
                 patch("brimstone.cli._milestone_exists", return_value=True),
                 patch("brimstone.cli._get_default_branch_for_repo", return_value="main"),
                 patch("brimstone.cli._count_open_issues_by_label", return_value=2),
+                patch("brimstone.cli._count_all_issues_by_label", return_value=1),
                 patch("brimstone.cli._doc_exists_on_default_branch", return_value=False),
                 patch("brimstone.cli._list_open_issues_by_label", return_value=[{"number": 1}]),
                 patch(

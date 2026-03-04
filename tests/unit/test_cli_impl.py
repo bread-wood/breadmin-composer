@@ -25,6 +25,7 @@ import pytest
 from brimstone.cli import (
     IMPL_LABEL,
     UsageGovernor,
+    _dispatch_conflict_resolution_agent,
     _extract_module,
     _find_next_version,
     _find_pr_for_branch,
@@ -33,6 +34,8 @@ from brimstone.cli import (
     _get_review_status,
     _list_open_issues_by_label,
     _monitor_pr,
+    _rebase_branch,
+    _resume_stale_issues,
     _run_impl_worker,
     _slugify,
     _triage_review_comments,
@@ -972,3 +975,368 @@ class TestRunImplWorkerRateLimitHandling:
             )
 
         mock_unclaim.assert_called_with(repo="owner/repo", issue_number=10)
+
+
+# ---------------------------------------------------------------------------
+# _dispatch_conflict_resolution_agent
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchConflictResolutionAgent:
+    def test_returns_true_when_agent_succeeds(self) -> None:
+        """Returns True when _run_agent returns a non-error result."""
+        success_result = make_run_result(is_error=False)
+
+        with patch("brimstone.cli._run_agent", return_value=success_result) as mock_run:
+            result = _dispatch_conflict_resolution_agent(
+                branch="57-add-feature",
+                worktree_path="/tmp/wt",
+                repo="owner/repo",
+                default_branch="mainline",
+                config=make_config(),
+            )
+
+        assert result is True
+        mock_run.assert_called_once()
+
+    def test_returns_false_when_agent_errors(self) -> None:
+        """Returns False when _run_agent returns an error result."""
+        error_result = make_run_result(is_error=True)
+
+        with patch("brimstone.cli._run_agent", return_value=error_result):
+            result = _dispatch_conflict_resolution_agent(
+                branch="57-add-feature",
+                worktree_path="/tmp/wt",
+                repo="owner/repo",
+                default_branch="mainline",
+                config=make_config(),
+            )
+
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# _rebase_branch — conflict agent dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestRebaseBranchConflictAgent:
+    def _make_proc(self, returncode: int = 0) -> MagicMock:
+        proc = MagicMock()
+        proc.returncode = returncode
+        proc.stdout = ""
+        proc.stderr = ""
+        return proc
+
+    def test_calls_conflict_agent_when_rebase_fails(self) -> None:
+        """When rebase fails and config is provided, dispatches conflict agent."""
+        fetch_ok = self._make_proc(0)
+        rebase_fail = self._make_proc(1)
+
+        with (
+            patch("brimstone.cli.subprocess.run", side_effect=[fetch_ok, rebase_fail]),
+            patch(
+                "brimstone.cli._dispatch_conflict_resolution_agent", return_value=True
+            ) as mock_agent,
+        ):
+            result = _rebase_branch(
+                "57-add-feature",
+                "owner/repo",
+                "/tmp/wt",
+                "mainline",
+                config=make_config(),
+            )
+
+        assert result is True
+        mock_agent.assert_called_once()
+
+    def test_aborts_rebase_when_no_config(self) -> None:
+        """When rebase fails and config is None, aborts rebase and returns False."""
+        fetch_ok = self._make_proc(0)
+        rebase_fail = self._make_proc(1)
+        abort_ok = self._make_proc(0)
+
+        with (
+            patch(
+                "brimstone.cli.subprocess.run",
+                side_effect=[fetch_ok, rebase_fail, abort_ok],
+            ),
+            patch("brimstone.cli._dispatch_conflict_resolution_agent") as mock_agent,
+        ):
+            result = _rebase_branch(
+                "57-add-feature",
+                "owner/repo",
+                "/tmp/wt",
+                "mainline",
+                config=None,
+            )
+
+        assert result is False
+        mock_agent.assert_not_called()
+
+    def test_aborts_when_agent_also_fails(self) -> None:
+        """When conflict agent fails, aborts and returns False."""
+        fetch_ok = self._make_proc(0)
+        rebase_fail = self._make_proc(1)
+        abort_ok = self._make_proc(0)
+
+        with (
+            patch(
+                "brimstone.cli.subprocess.run",
+                side_effect=[fetch_ok, rebase_fail, abort_ok],
+            ),
+            patch("brimstone.cli._dispatch_conflict_resolution_agent", return_value=False),
+        ):
+            result = _rebase_branch(
+                "57-add-feature",
+                "owner/repo",
+                "/tmp/wt",
+                "mainline",
+                config=make_config(),
+            )
+
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# _monitor_pr — _rebase_branch called with config kwarg
+# ---------------------------------------------------------------------------
+
+
+class TestMonitorPrRebaseConfig:
+    def _make_monitor_kwargs(self, **overrides) -> dict:
+        defaults = dict(
+            pr_number=99,
+            branch="57-add-feature",
+            repo="owner/repo",
+            config=make_config(),
+            checkpoint=make_checkpoint(),
+            worktree_path="/tmp/worktree",
+            issue_number=57,
+            poll_interval=0,
+        )
+        defaults.update(overrides)
+        return defaults
+
+    def test_passes_config_to_rebase_branch(self) -> None:
+        """_rebase_branch is called with config= kwarg from _monitor_pr."""
+        pass_checks = [{"name": "ci", "state": "completed", "bucket": "pass"}]
+
+        def gh_side_effect(args, **kwargs):
+            args_str = " ".join(str(a) for a in args)
+            if "checks" in args_str:
+                return make_gh_result(stdout=json.dumps(pass_checks))
+            elif "reviews" in args_str:
+                return make_gh_result(stdout=json.dumps({"reviews": []}))
+            elif "merge" in args_str:
+                return make_gh_result(returncode=0)
+            return make_gh_result()
+
+        with (
+            patch("brimstone.cli._gh", side_effect=gh_side_effect),
+            patch("brimstone.cli._is_conflict_failure", side_effect=[True, False]),
+            patch("brimstone.cli._rebase_branch", return_value=True) as mock_rebase,
+            patch("brimstone.cli.logger.log_conductor_event"),
+            patch("brimstone.cli.session.save"),
+        ):
+            config = make_config()
+            result = _monitor_pr(**self._make_monitor_kwargs(config=config, max_polls=10))
+
+        assert result is True
+        _, kwargs = mock_rebase.call_args
+        assert "config" in kwargs
+        assert kwargs["config"] is config
+
+
+# ---------------------------------------------------------------------------
+# _resume_stale_issues — worktree creation and cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestResumeStaleIssuesWorktree:
+    def _make_stale_issue(self, number: int = 57) -> dict:
+        return {"number": number, "labels": [{"name": "stage/impl"}], "assignees": []}
+
+    def test_creates_worktree_for_pr_when_repo_root_provided(self) -> None:
+        """When repo_root is given and PR exists, _checkout_existing_branch_worktree is called."""
+        stale = self._make_stale_issue(57)
+        config = make_config()
+        checkpoint = make_checkpoint()
+
+        with (
+            patch("brimstone.cli._list_in_progress_issues", return_value=[stale]),
+            patch("brimstone.cli._find_pr_for_issue", return_value=(64, "57-add-feature")),
+            patch(
+                "brimstone.cli._checkout_existing_branch_worktree", return_value="/tmp/wt/57"
+            ) as mock_checkout,
+            patch("brimstone.cli._monitor_pr") as mock_monitor,
+            patch("brimstone.cli._remove_worktree") as mock_remove,
+            patch("brimstone.cli.click.echo"),
+        ):
+            _resume_stale_issues(
+                repo="owner/repo",
+                milestone="v1",
+                label="stage/impl",
+                log_prefix="[test]",
+                config=config,
+                checkpoint=checkpoint,
+                repo_root="/repo",
+            )
+
+        mock_checkout.assert_called_once_with("57-add-feature", "/repo")
+        mock_monitor.assert_called_once()
+        _, kwargs = mock_monitor.call_args
+        assert kwargs["worktree_path"] == "/tmp/wt/57"
+        mock_remove.assert_called_once_with("/tmp/wt/57", "/repo")
+
+    def test_cleans_up_worktree_after_monitoring_raises(self) -> None:
+        """Worktree is removed even if _monitor_pr raises an exception."""
+        stale = self._make_stale_issue(57)
+        config = make_config()
+        checkpoint = make_checkpoint()
+
+        with (
+            patch("brimstone.cli._list_in_progress_issues", return_value=[stale]),
+            patch("brimstone.cli._find_pr_for_issue", return_value=(64, "57-add-feature")),
+            patch("brimstone.cli._checkout_existing_branch_worktree", return_value="/tmp/wt/57"),
+            patch("brimstone.cli._monitor_pr", side_effect=RuntimeError("boom")),
+            patch("brimstone.cli._remove_worktree") as mock_remove,
+            patch("brimstone.cli.click.echo"),
+        ):
+            with pytest.raises(RuntimeError):
+                _resume_stale_issues(
+                    repo="owner/repo",
+                    milestone="v1",
+                    label="stage/impl",
+                    log_prefix="[test]",
+                    config=config,
+                    checkpoint=checkpoint,
+                    repo_root="/repo",
+                )
+
+        mock_remove.assert_called_once_with("/tmp/wt/57", "/repo")
+
+    def test_no_worktree_when_repo_root_empty(self) -> None:
+        """When repo_root is empty, _checkout_existing_branch_worktree is not called."""
+        stale = self._make_stale_issue(57)
+
+        with (
+            patch("brimstone.cli._list_in_progress_issues", return_value=[stale]),
+            patch("brimstone.cli._find_pr_for_issue", return_value=(64, "57-add-feature")),
+            patch("brimstone.cli._checkout_existing_branch_worktree") as mock_checkout,
+            patch("brimstone.cli._monitor_pr"),
+            patch("brimstone.cli._remove_worktree"),
+            patch("brimstone.cli.click.echo"),
+        ):
+            _resume_stale_issues(
+                repo="owner/repo",
+                milestone="v1",
+                label="stage/impl",
+                log_prefix="[test]",
+                config=make_config(),
+                checkpoint=make_checkpoint(),
+                repo_root="",
+            )
+
+        mock_checkout.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _run_agent — /tmp config dir cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestRunAgentConfigDirCleanup:
+    def test_cleans_config_dir_after_success(self) -> None:
+        """shutil.rmtree is called on config_dir when issue_number is set."""
+        success_result = make_run_result(is_error=False)
+
+        with (
+            patch("brimstone.cli.runner.run", return_value=success_result),
+            patch("brimstone.cli.write_skill_tmp") as mock_skill,
+            patch("brimstone.cli.build_subprocess_env", return_value={}),
+            patch("brimstone.cli.logger.log_agent_transcript"),
+            patch("brimstone.cli.shutil.rmtree") as mock_rmtree,
+            patch("brimstone.cli.uuid.uuid4", return_value=MagicMock(hex="abcd1234")),
+        ):
+            mock_skill.return_value.__enter__ = MagicMock()
+            mock_skill.return_value.unlink = MagicMock()
+
+            from brimstone.cli import _run_agent
+
+            _run_agent(
+                prompt="do stuff",
+                skill_name="impl-worker",
+                allowed_tools=["Bash"],
+                max_turns=10,
+                log_label="test",
+                prefix="[test] ",
+                config=make_config(),
+                issue_number=42,
+            )
+
+        mock_rmtree.assert_called_once()
+        call_args = mock_rmtree.call_args[0][0]
+        assert "42" in call_args
+        assert "abcd1234" in call_args
+
+    def test_cleans_config_dir_after_error(self) -> None:
+        """shutil.rmtree is called even when runner.run raises."""
+        with (
+            patch("brimstone.cli.runner.run", side_effect=RuntimeError("runner failed")),
+            patch("brimstone.cli.write_skill_tmp") as mock_skill,
+            patch("brimstone.cli.build_subprocess_env", return_value={}),
+            patch("brimstone.cli.shutil.rmtree") as mock_rmtree,
+            patch("brimstone.cli.uuid.uuid4", return_value=MagicMock(hex="abcd1234")),
+        ):
+            mock_skill.return_value.__enter__ = MagicMock()
+            mock_skill.return_value.unlink = MagicMock()
+
+            from brimstone.cli import _run_agent
+
+            with pytest.raises(RuntimeError):
+                _run_agent(
+                    prompt="do stuff",
+                    skill_name="impl-worker",
+                    allowed_tools=["Bash"],
+                    max_turns=10,
+                    log_label="test",
+                    prefix="[test] ",
+                    config=make_config(),
+                    issue_number=42,
+                )
+
+        mock_rmtree.assert_called_once()
+
+    def test_always_creates_config_dir_when_issue_number_none(self) -> None:
+        """Config dir is always created, even without issue_number (uses 'agent' key)."""
+        success_result = make_run_result(is_error=False)
+
+        with (
+            patch("brimstone.cli.runner.run", return_value=success_result),
+            patch("brimstone.cli.write_skill_tmp") as mock_skill,
+            patch("brimstone.cli.build_subprocess_env", return_value={}),
+            patch("brimstone.cli.logger.log_agent_transcript"),
+            patch("brimstone.cli.shutil.rmtree") as mock_rmtree,
+            patch("brimstone.cli.uuid.uuid4", return_value=MagicMock(hex="deadbeef")),
+        ):
+            mock_skill.return_value.__enter__ = MagicMock()
+            mock_skill.return_value.unlink = MagicMock()
+
+            from brimstone.cli import _run_agent
+
+            _run_agent(
+                prompt="do stuff",
+                skill_name="impl-worker",
+                allowed_tools=["Bash"],
+                max_turns=10,
+                log_label="test",
+                prefix="[test] ",
+                config=make_config(),
+                issue_number=None,
+            )
+
+        mock_rmtree.assert_called_once()
+        call_args = mock_rmtree.call_args[0][0]
+        assert "agent" in call_args
+        assert "deadbeef" in call_args

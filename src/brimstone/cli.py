@@ -219,14 +219,17 @@ def _run_agent(
     and transcript logging. The caller is responsible only for building the
     prompt and interpreting the result.
 
+    Always creates an isolated CLAUDE_CONFIG_DIR so the global ~/.claude/CLAUDE.md
+    (which contains orchestrator instructions) is not loaded into sub-agents.
+
     Args:
         issue_number: When provided, bakes the issue number into CLAUDE_CONFIG_DIR
-                      for a unique per-agent isolation path.
+                      for a unique per-agent path that aids log correlation.
     """
     skill_tmp = write_skill_tmp(skill_name)
-    extra: dict[str, str] = {}
-    if issue_number is not None:
-        extra["CLAUDE_CONFIG_DIR"] = f"/tmp/brimstone-agent-{issue_number}-{uuid.uuid4().hex}"
+    key = issue_number if issue_number is not None else "agent"
+    config_dir = f"/tmp/brimstone-agent-{key}-{uuid.uuid4().hex}"
+    extra: dict[str, str] = {"CLAUDE_CONFIG_DIR": config_dir}
     env = build_subprocess_env(config, extra=extra if extra else None)
     try:
         result = runner.run(
@@ -244,6 +247,8 @@ def _run_agent(
         )
     finally:
         skill_tmp.unlink(missing_ok=True)
+        if config_dir:
+            shutil.rmtree(config_dir, ignore_errors=True)
     logger.log_agent_transcript(
         result.all_events,
         log_label,
@@ -631,6 +636,7 @@ def _resume_stale_issues(
     config: Config,
     checkpoint: Checkpoint,
     default_branch: str = "main",
+    repo_root: str = "",
 ) -> None:
     """Resume or unclaim in-progress issues from a crashed previous session.
 
@@ -638,6 +644,9 @@ def _resume_stale_issues(
     - If an open PR exists: monitor it to completion.
     - If a merged PR exists (orchestrator crashed after merge): close the issue.
     - Otherwise: unclaim so it can be re-dispatched cleanly.
+
+    When *repo_root* is provided, a temporary worktree is created for the
+    stale branch so that conflict detection and rebase work correctly.
 
     Called at the start of research-worker, design-worker, and impl-worker.
     """
@@ -650,15 +659,23 @@ def _resume_stale_issues(
                 f"{log_prefix} Resuming: monitoring PR #{pr_number} for issue #{stale_number}",
                 err=True,
             )
-            _monitor_pr(
-                pr_number=pr_number,
-                branch=stale_branch,
-                repo=repo,
-                config=config,
-                checkpoint=checkpoint,
-                issue_number=stale_number,
-                default_branch=default_branch,
-            )
+            wt_path = ""
+            if repo_root:
+                wt_path = _checkout_existing_branch_worktree(stale_branch, repo_root) or ""
+            try:
+                _monitor_pr(
+                    pr_number=pr_number,
+                    branch=stale_branch,
+                    repo=repo,
+                    config=config,
+                    checkpoint=checkpoint,
+                    issue_number=stale_number,
+                    worktree_path=wt_path,
+                    default_branch=default_branch,
+                )
+            finally:
+                if wt_path:
+                    _remove_worktree(wt_path, repo_root)
         elif _pr_merged_for_issue(repo, stale_number):
             _gh(["issue", "close", str(stale_number)], repo=repo, check=False)
             click.echo(
@@ -739,6 +756,38 @@ def _count_open_issues_by_label(repo: str, milestone: str, label: str) -> int:
             "list",
             "--state",
             "open",
+            "--label",
+            label,
+            "--milestone",
+            milestone,
+            "--json",
+            "number",
+            "--limit",
+            "200",
+        ],
+        repo=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        return 0
+    try:
+        return len(json.loads(result.stdout))
+    except json.JSONDecodeError:
+        return 0
+
+
+def _count_all_issues_by_label(repo: str, milestone: str, label: str) -> int:
+    """Return count of ALL issues (open + closed) for a stage label.
+
+    Used by the scope completion check so that scope is not re-run once all
+    impl issues have been closed by agents.
+    """
+    result = _gh(
+        [
+            "issue",
+            "list",
+            "--state",
+            "all",
             "--label",
             label,
             "--milestone",
@@ -1508,6 +1557,7 @@ def _run_research_worker(
             config=config,
             checkpoint=checkpoint,
             default_branch=default_branch,
+            repo_root=repo_root,
         )
         _startup_dep_checks(_list_open_issues_by_label(repo, milestone, RESEARCH_LABEL), repo)
 
@@ -2079,7 +2129,11 @@ def _is_conflict_failure(repo: str, pr_number: int) -> bool:
 
 
 def _rebase_branch(
-    branch: str, repo: str, worktree_path: str, default_branch: str = "main"
+    branch: str,
+    repo: str,
+    worktree_path: str,
+    default_branch: str = "main",
+    config: Config | None = None,
 ) -> bool:
     """Rebase a worktree branch onto the remote default branch.
 
@@ -2088,6 +2142,8 @@ def _rebase_branch(
         repo:           Repository in ``owner/repo`` format (unused but kept for context).
         worktree_path:  Absolute path to the worktree directory.
         default_branch: Default branch name (e.g. ``"main"``, ``"mainline"``).
+        config:         When provided, dispatches a Claude agent to resolve conflicts
+                        instead of aborting immediately.
 
     Returns:
         True if the rebase succeeded, False if it failed or conflicted.
@@ -2110,7 +2166,13 @@ def _rebase_branch(
         text=True,
     )
     if rebase.returncode != 0:
-        # Abort on failure
+        if config is not None:
+            resolved = _dispatch_conflict_resolution_agent(
+                branch, worktree_path, repo, default_branch, config
+            )
+            if resolved:
+                return True
+        # Abort on unresolvable failure
         subprocess.run(
             ["git", "rebase", "--abort"],
             cwd=worktree_path,
@@ -2167,6 +2229,53 @@ def _get_review_status(repo: str, pr_number: int) -> str:
     if "APPROVED" in states:
         return "approved"
     return "no_review"
+
+
+def _dispatch_conflict_resolution_agent(
+    branch: str,
+    worktree_path: str,
+    repo: str,
+    default_branch: str,
+    config: Config,
+) -> bool:
+    """Dispatch a Claude agent to resolve rebase conflicts in the worktree.
+
+    Called when git rebase fails due to conflicts. The agent inspects
+    conflicted files, resolves them (preferring upstream for metadata),
+    runs git add + git rebase --continue, then force-pushes.
+
+    Returns True if the agent resolved conflicts and pushed, False otherwise.
+    """
+    prompt = (
+        f"## Headless Conflict Resolution\n"
+        f"You are running in a fully automated headless pipeline. No human is present.\n"
+        f"Use tools directly and silently. Do NOT produce conversational text.\n\n"
+        f"## Task\n"
+        f"A `git rebase origin/{default_branch}` on branch `{branch}` "
+        f"has left the worktree in a conflicted state.\n"
+        f"Resolve the conflicts, complete the rebase, and push.\n\n"
+        f"## Steps\n"
+        f"1. cd {worktree_path}\n"
+        f"2. Run `git status` to identify conflicted files\n"
+        f"3. For each conflicted file:\n"
+        f"   - Read the conflict markers carefully\n"
+        f"   - For documentation/README files: accept upstream (mainline) version\n"
+        f"   - For source code: merge both sets of changes correctly\n"
+        f"4. `git add` each resolved file\n"
+        f"5. `git rebase --continue` (set GIT_EDITOR=true to skip editor)\n"
+        f"6. `git push --force-with-lease origin {branch}`\n"
+        f"7. STOP. Do not create PRs or do anything else.\n"
+    )
+    result = _run_agent(
+        prompt,
+        "conflict-resolver",
+        runner.TOOLS_IMPL_AGENT,
+        30,
+        f"conflict-resolve-{branch}",
+        f"[conflict-resolve {branch}] ",
+        config,
+    )
+    return not result.is_error
 
 
 def _find_next_version(milestone: str) -> str:
@@ -2274,7 +2383,7 @@ def _monitor_pr(
                 )
                 return False
 
-            rebase_ok = _rebase_branch(branch, repo, worktree_path, default_branch)
+            rebase_ok = _rebase_branch(branch, repo, worktree_path, default_branch, config=config)
             rebase_attempts += 1
             if not rebase_ok:
                 logger.log_conductor_event(
@@ -2547,6 +2656,50 @@ def _create_worktree(branch: str, repo_root: str, default_branch: str = "main") 
     )
 
     return worktree_dir
+
+
+def _checkout_existing_branch_worktree(branch: str, repo_root: str) -> str | None:
+    """Create a git worktree tracking an already-existing remote branch.
+
+    Unlike _create_worktree, does NOT create a new branch — checks out
+    the already-existing remote branch into a new worktree directory.
+
+    Used by _resume_stale_issues so that conflict detection and rebase
+    work correctly for branches pushed by a previous session.
+
+    Args:
+        branch:    Branch name (e.g. ``"57-add-calculator"``).
+        repo_root: Absolute path to the repository root.
+
+    Returns:
+        Absolute path to the new worktree directory, or ``None`` on failure.
+    """
+    worktree_dir = os.path.join(repo_root, ".claude", "worktrees", branch)
+
+    # Remove any stale worktree entry for this path.
+    subprocess.run(
+        ["git", "worktree", "remove", "--force", worktree_dir],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+
+    # Fetch so origin/<branch> is up to date.
+    subprocess.run(
+        ["git", "fetch", "origin"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+
+    # Create worktree checking out the existing remote branch.
+    result = subprocess.run(
+        ["git", "worktree", "add", worktree_dir, "-b", branch, f"origin/{branch}"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    return worktree_dir if result.returncode == 0 else None
 
 
 def _remove_worktree(worktree_path: str, repo_root: str) -> None:
@@ -2885,6 +3038,7 @@ def _run_impl_worker(
             config=config,
             checkpoint=checkpoint,
             default_branch=default_branch,
+            repo_root=repo_root,
         )
         _startup_dep_checks(_list_open_issues_by_label(repo, milestone, IMPL_LABEL), repo)
 
@@ -3131,6 +3285,7 @@ def _run_design_worker(
             config=config,
             checkpoint=checkpoint,
             default_branch=default_branch,
+            repo_root=repo_root,
         )
     else:
         _clone_dir = None
@@ -4436,7 +4591,7 @@ def run(
                     ):
                         click.echo(f"[run] {stage} ({ms}): already complete, skipping", err=True)
                         continue
-                    if stage == "scope" and _list_open_issues_by_label(repo_ref, ms, IMPL_LABEL):
+                    if stage == "scope" and _count_all_issues_by_label(repo_ref, ms, IMPL_LABEL):
                         click.echo(
                             f"[run] {stage} ({ms}): impl issues already exist, skipping", err=True
                         )
