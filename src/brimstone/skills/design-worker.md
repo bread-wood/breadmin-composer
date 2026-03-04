@@ -52,7 +52,7 @@ ls docs/research/
 
 Read every doc that corresponds to the research milestone. Build a mental model of:
 - What is now known (key findings, constraints, chosen approaches)
-- What was explicitly deferred or marked `[V2_RESEARCH]`
+- What was explicitly deferred or marked `[DEFERRED]`
 - Any blocking contradictions or unresolved `[INFERRED]` claims that affect design
 
 ### Step 2 — Audit Existing Design Docs
@@ -163,7 +163,7 @@ gh issue create \
 ## Constraints
 
 - **No code** — design-worker creates design documents only, never touches source files
-- **No GitHub issues** — creating impl issues is plan-issues's job; design-worker MUST NOT file impl issues
+- **No GitHub issues** — design-worker MUST NOT create any GitHub issues of any kind. No LLD tracking issues, no impl issues, no pipeline issues. Writing docs and opening PRs is the only output. If you find yourself about to call `gh issue create`, stop — write the doc instead.
 - **No dispatching** — design-worker does not launch sub-agents
 - **One PR per doc** — HLD gets its own PR; each LLD gets its own PR; merge before writing the next
 - **No gold-plating** — document only what research explicitly determined; don't invent scope
