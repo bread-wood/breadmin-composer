@@ -1228,23 +1228,21 @@ def _classify_blocking_issues(
 ) -> tuple[list[dict], list[dict]]:
     """Classify remaining open research issues as blocking or non-blocking.
 
-    An issue is blocking if answering it would change the design of a
-    current-milestone implementation issue (not just improve its quality).
+    Classification rule (tag-based, deterministic):
+    - ``[DEFERRED]`` in body → non-blocking (explicitly deferred to next version)
+    - Everything else → blocking (default; research agents must explicitly defer)
 
-    Classification heuristic:
-    1. If the issue body contains ``[BLOCKS_IMPL]`` tag → blocking (fast path).
-    2. Otherwise, call runner.run() to ask Claude to classify.
-
-    Output is suppressed per-issue; a single summary line is printed after
-    all issues are classified.
+    This approach is conservative by design: an issue without an explicit
+    ``[DEFERRED]`` tag is assumed to block the current milestone. Research
+    agents and plan-milestones are responsible for tagging deferred work.
 
     Args:
         open_issues: List of open research issue dicts.
-        repo:        Repository in ``owner/repo`` format.
-        milestone:   Active research milestone name.
-        config:      Current Config instance.
-        checkpoint:  Current Checkpoint instance.
-        dry_run:     If True, treat all issues as non-blocking without calling runner.
+        repo:        Repository in ``owner/repo`` format (unused; kept for API compat).
+        milestone:   Active research milestone name (unused; kept for API compat).
+        config:      Current Config instance (unused; kept for API compat).
+        checkpoint:  Current Checkpoint instance (unused; kept for API compat).
+        dry_run:     If True, treat all issues as non-blocking.
 
     Returns:
         Tuple of (blocking_issues, non_blocking_issues).
@@ -1257,55 +1255,10 @@ def _classify_blocking_issues(
 
     for issue in open_issues:
         body = issue.get("body") or ""
-        if "[BLOCKS_IMPL]" in body:
-            blocking.append(issue)
-            continue
-
-        # Ask Claude to classify — output suppressed; we print a summary below.
-        issue_number = issue.get("number", "?")
-        issue_title = issue.get("title", "")
-        issue_body = _sanitize_issue_body(body)
-
-        prompt = (
-            f"You are a research classification assistant. Determine whether the following "
-            f"open research issue is BLOCKING or NON-BLOCKING for the current implementation "
-            f"milestone.\n\n"
-            f"A research issue is BLOCKING if answering it would change the *design* (not "
-            f"just the *quality*) of a current-milestone implementation issue. It is "
-            f"NON-BLOCKING if implementation can proceed with a reasonable default and the "
-            f"answer would only refine—not redesign—the implementation.\n\n"
-            f"Repository: {repo}\n"
-            f"Research Milestone: {milestone}\n\n"
-            f"## Issue #{issue_number}: {issue_title}\n\n"
-            f"{issue_body}\n\n"
-            f"Respond with exactly one word on the first line: BLOCKING or NON-BLOCKING\n"
-            f"Then a brief (1-2 sentence) reason.\n"
-        )
-
-        env = build_subprocess_env(config)
-        result = runner.run(
-            prompt=prompt,
-            allowed_tools=["Bash"],
-            env=env,
-            max_turns=5,
-            verbose=False,
-            print_text_output=False,
-            timeout_seconds=config.agent_timeout_minutes * 60,
-            model=config.model,
-        )
-
-        if result.is_error:
-            # Conservative: treat as non-blocking on runner failure
+        if "[DEFERRED]" in body:
             non_blocking.append(issue)
-            continue
-
-        raw_event = result.raw_result_event or {}
-        result_text = (raw_event.get("result") or "").strip().upper()
-
-        if result_text.startswith("BLOCKING"):
-            blocking.append(issue)
         else:
-            non_blocking.append(issue)
+            blocking.append(issue)
 
     click.echo(
         f"[blocking-check] {len(blocking)} blocking, {len(non_blocking)} non-blocking "
@@ -1436,7 +1389,11 @@ def _dispatch_research_agent(
         f'## Follow-up issues spawned\n<list or none>"\n'
         f"```\n\n"
         f"Steps B and C are NOT optional. The pipeline stalls if no PR is created.\n"
-        f"Execute them immediately — do not say 'ready to push' or ask for approval."
+        f"Execute them immediately — do not say 'ready to push' or ask for approval.\n\n"
+        f"**After the PR URL is confirmed:** output exactly one line: `Done.`\n"
+        f"Do NOT summarize findings, restate conclusions, or add any other text.\n"
+        f"The research document is the deliverable — not your terminal output.\n\n"
+        f"**Prohibited:** Do NOT use the TodoWrite tool at any point."
     )
     skill_tmp = write_skill_tmp("research-worker")
 
@@ -1465,6 +1422,12 @@ def _dispatch_research_agent(
         )
     finally:
         skill_tmp.unlink(missing_ok=True)
+    logger.log_agent_transcript(
+        result.all_events,
+        f"research-{issue_number}",
+        session_id=(result.raw_result_event or {}).get("session_id"),
+        log_dir=config.log_dir.expanduser(),
+    )
     return issue, branch_name, worktree_path, result
 
 
@@ -2893,6 +2856,17 @@ def _dispatch_design_agent(
     finally:
         skill_tmp.unlink(missing_ok=True)
 
+    label = (
+        f"design-hld-{issue.get('number', 0)}"
+        if module_name is None
+        else f"design-lld-{module_name}-{issue.get('number', 0)}"
+    )
+    logger.log_agent_transcript(
+        result.all_events,
+        label,
+        session_id=(result.raw_result_event or {}).get("session_id"),
+        log_dir=config.log_dir.expanduser(),
+    )
     return result
 
 
@@ -3013,6 +2987,12 @@ def _dispatch_impl_agent(
         )
     finally:
         skill_tmp.unlink(missing_ok=True)
+    logger.log_agent_transcript(
+        result.all_events,
+        f"impl-{issue_number}",
+        session_id=(result.raw_result_event or {}).get("session_id"),
+        log_dir=config.log_dir.expanduser(),
+    )
     return issue, branch, worktree_path, result
 
 
@@ -3284,14 +3264,19 @@ def _run_design_worker(
     checkpoint_path = config.checkpoint_dir.expanduser() / "current.json"
 
     # ------------------------------------------------------------------ #
-    # Gate 1: All research must be closed before design begins            #
+    # Gate 1: No blocking research issues may remain                     #
     # ------------------------------------------------------------------ #
     if not dry_run:
-        open_research = _count_all_open_research_issues(repo, milestone)
-        if open_research > 0:
+        open_research_issues = _list_open_research_issues(repo, milestone)
+        blocking, _ = _classify_blocking_issues(
+            open_research_issues, repo, milestone, config, checkpoint
+        )
+        if blocking:
+            nums = ", ".join(f"#{i['number']}" for i in blocking)
             click.echo(
-                f"Error: {open_research} research issue(s) still open for milestone "
-                f"'{milestone}'. All research must complete before design can begin.",
+                f"Error: {len(blocking)} blocking research issue(s) still open for milestone "
+                f"'{milestone}' ({nums}). All blocking research must complete before design "
+                f"can begin. Non-blocking [DEFERRED] issues may remain open.",
                 err=True,
             )
             raise SystemExit(1)
@@ -3680,6 +3665,12 @@ def _run_plan_issues(
     finally:
         skill_tmp.unlink(missing_ok=True)
 
+    logger.log_agent_transcript(
+        result.all_events,
+        f"plan-issues-{milestone}",
+        session_id=(result.raw_result_event or {}).get("session_id"),
+        log_dir=config.log_dir.expanduser(),
+    )
     logger.log_cost(
         result.raw_result_event or {},
         logger.LogContext(
@@ -4260,6 +4251,12 @@ def _run_plan_milestones(
     finally:
         skill_tmp.unlink(missing_ok=True)
 
+    logger.log_agent_transcript(
+        result.all_events,
+        f"plan-milestones-{version}",
+        session_id=(result.raw_result_event or {}).get("session_id"),
+        log_dir=config.log_dir.expanduser(),
+    )
     logger.log_cost(
         result.raw_result_event or {},
         logger.LogContext(
@@ -4613,16 +4610,21 @@ def run(
     default_branch = _get_default_branch_for_repo(repo_ref) if repo_ref and not dry_run else "main"
 
     # -----------------------------------------------------------------------
-    # Execute stages in pipeline order
+    # Execute milestone-first: complete each milestone fully before starting
+    # the next. This ensures implementation decisions from vN inform vN+1
+    # research and planning.
+    #
+    # Order: plan v0.3.0 → research → design → scope → impl v0.3.0
+    #        plan v0.4.0 → research → design → scope → impl v0.4.0
     # -----------------------------------------------------------------------
-    for stage in stages:
-        click.echo(f"\n── Stage: {stage} ──", err=True)
+    _plan_skip = frozenset({"yeast-bot is repo collaborator"})
 
-        if stage == "plan":
-            # Plan loops over every spec, inferring milestone from stem.
-            _plan_skip = frozenset({"yeast-bot is repo collaborator"})
-            for resolved_spec in resolved_specs:
-                ms = resolved_spec.stem
+    for i, ms in enumerate(effective_milestones):
+        for stage in stages:
+            click.echo(f"\n── Stage: {stage} ({ms}) ──", err=True)
+
+            if stage == "plan":
+                resolved_spec = resolved_specs[i]
                 stem = resolved_spec.stem
                 if dry_run:
                     click.echo(
@@ -4649,11 +4651,7 @@ def run(
                     spec_stem=stem,
                     spec_local_path=str(resolved_spec),
                 )
-            if dry_run:
-                continue
-        else:
-            # research / design / scope / impl — loop over all effective milestones
-            for ms in effective_milestones:
+            else:
                 # Completion check — skip if stage is already done
                 if not dry_run:
                     if stage == "research" and _count_all_open_research_issues(repo_ref, ms) == 0:
