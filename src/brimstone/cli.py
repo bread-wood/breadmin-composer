@@ -4520,8 +4520,9 @@ def run(
 
     # -----------------------------------------------------------------------
     # Milestone existence check for all non-plan stages
+    # Skip check when plan is also running — it will create the milestone first.
     # -----------------------------------------------------------------------
-    if not dry_run and non_plan_stages:
+    if not dry_run and non_plan_stages and "plan" not in stages:
         for ms in effective_milestones:
             if not _milestone_exists(repo_ref, ms):
                 raise click.ClickException(
