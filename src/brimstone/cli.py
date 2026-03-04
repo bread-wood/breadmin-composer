@@ -4612,12 +4612,20 @@ def _check_gate_before_stage(
                 "Run `brimstone run --research` first, or use `--all` to run all stages."
             )
 
-    if stage == "impl" and "design" not in stages_being_run:
+    if stage == "scope" and "design" not in stages_being_run:
         hld_path = "docs/design/HLD.md"
         if not _doc_exists_on_default_branch(repo, hld_path, default_branch):
             raise click.ClickException(
                 f"Design doc '{hld_path}' does not exist on branch '{default_branch}'. "
-                "Run `brimstone run --design` first, or use `--all` to run all stages."
+                "Run `brimstone run --design` first."
+            )
+
+    if stage == "impl" and "scope" not in stages_being_run:
+        open_impl = _list_open_impl_issues(repo, milestone)
+        if not open_impl:
+            raise click.ClickException(
+                f"No open impl issues found for milestone '{milestone}'. "
+                "Run `brimstone run --scope` first to generate them from the design docs."
             )
 
 
@@ -4639,12 +4647,18 @@ def _check_gate_before_stage(
 )
 @click.option("--research", "do_research", is_flag=True, help="Run the research stage")
 @click.option("--design", "do_design", is_flag=True, help="Run the design stage")
+@click.option(
+    "--scope",
+    "do_scope",
+    is_flag=True,
+    help="Run the scoping stage (reads HLD + LLDs, files impl issues)",
+)
 @click.option("--impl", "do_impl", is_flag=True, help="Run the implementation stage")
 @click.option(
     "--all",
     "do_all",
     is_flag=True,
-    help="Run all pipeline stages in order (research → design → impl)",
+    help="Run all pipeline stages in order (research → design → scope → impl)",
 )
 @click.option(
     "--milestone",
@@ -4671,6 +4685,7 @@ def run(
     do_plan: bool,
     do_research: bool,
     do_design: bool,
+    do_scope: bool,
     do_impl: bool,
     do_all: bool,
     milestone: str | None,
@@ -4681,7 +4696,7 @@ def run(
 ) -> None:
     """Run one or more pipeline stages for a milestone.
 
-    Stages execute in pipeline order: plan → research → design → impl.
+    Stages execute in pipeline order: plan → research → design → scope → impl.
     Prerequisites are checked before each stage unless the prerequisite is
     also being run in the same invocation.
 
@@ -4693,7 +4708,9 @@ def run(
 
       brimstone run --research --milestone "v0.1.0"
 
-      brimstone run --design --impl --milestone "v0.1.0"
+      brimstone run --design --scope --milestone "v0.1.0"
+
+      brimstone run --scope --impl --milestone "v0.1.0"
 
       brimstone run --all --milestone "v0.1.0" --dry-run
     """
@@ -4705,7 +4722,7 @@ def run(
     # Determine ordered stages to run
     # -----------------------------------------------------------------------
     if do_all:
-        stages: list[str] = ["research", "design", "impl"]
+        stages: list[str] = ["research", "design", "scope", "impl"]
     else:
         stages = [
             s
@@ -4713,6 +4730,7 @@ def run(
                 ("plan", do_plan),
                 ("research", do_research),
                 ("design", do_design),
+                ("scope", do_scope),
                 ("impl", do_impl),
             ]
             if flag
@@ -4720,7 +4738,7 @@ def run(
 
     if not stages:
         raise click.UsageError(
-            "Specify at least one stage: --plan, --research, --design, --impl, or --all"
+            "Specify at least one stage: --plan, --research, --design, --scope, --impl, or --all"
         )
 
     # --spec is required when --plan is in the stage list
@@ -4800,6 +4818,9 @@ def run(
                 repo_ref, "docs/design/HLD.md", default_branch
             ):
                 click.echo(f"[run] {stage}: already complete, skipping", err=True)
+                continue
+            if stage == "scope" and _list_open_impl_issues(repo_ref, milestone):
+                click.echo(f"[run] {stage}: impl issues already exist, skipping", err=True)
                 continue
 
         # Gate check — only when prerequisite is not also in this run (skip for plan)
@@ -4882,22 +4903,15 @@ def run(
                     checkpoint=_checkpoint,
                     dry_run=False,
                 )
+            elif stage == "scope":
+                _run_plan_issues(
+                    repo=repo_ref,
+                    milestone=milestone,
+                    config=_config,
+                    checkpoint=_checkpoint,
+                    dry_run=False,
+                )
             elif stage == "impl":
-                # Auto-run plan-issues first if no open impl issues exist yet
-                open_impl = _list_open_impl_issues(repo_ref, milestone)
-                if not open_impl:
-                    click.echo(
-                        f"[run] No open impl issues found for '{milestone}'; "
-                        "running plan-issues first...",
-                        err=True,
-                    )
-                    _run_plan_issues(
-                        repo=repo_ref,
-                        milestone=milestone,
-                        config=_config,
-                        checkpoint=_checkpoint,
-                        dry_run=False,
-                    )
                 _run_impl_worker(
                     repo=repo_ref,
                     milestone=milestone,

@@ -336,8 +336,9 @@ class TestRunGates:
 # ---------------------------------------------------------------------------
 
 
-class TestRunImplAutoPlanIssues:
-    def test_impl_auto_runs_plan_issues_when_empty(self, tmp_path: Path) -> None:
+class TestRunScopeStage:
+    def test_scope_calls_plan_issues(self, tmp_path: Path) -> None:
+        """--scope must invoke _run_plan_issues."""
         calls: list[str] = []
 
         with patch.dict("os.environ", MINIMAL_ENV, clear=False):
@@ -352,10 +353,25 @@ class TestRunImplAutoPlanIssues:
                     "brimstone.cli._run_plan_issues",
                     side_effect=lambda **kw: calls.append("plan-issues"),
                 ),
-                patch(
-                    "brimstone.cli._run_impl_worker",
-                    side_effect=lambda **kw: calls.append("impl"),
-                ),
+            ):
+                runner = CliRunner()
+                result = runner.invoke(
+                    composer,
+                    ["run", "--scope", "--repo", _REPO, "--milestone", _MILESTONE],
+                )
+
+        assert result.exit_code == 0, result.output
+        assert calls == ["plan-issues"]
+
+    def test_impl_fails_when_no_impl_issues(self, tmp_path: Path) -> None:
+        """--impl without prior --scope must fail with a clear error."""
+        with patch.dict("os.environ", MINIMAL_ENV, clear=False):
+            with (
+                patch("brimstone.cli._resolve_repo", return_value=(_REPO, str(tmp_path))),
+                patch("brimstone.cli._milestone_exists", return_value=True),
+                patch("brimstone.cli._get_default_branch_for_repo", return_value="main"),
+                patch("brimstone.cli._doc_exists_on_default_branch", return_value=True),
+                patch("brimstone.cli._list_open_impl_issues", return_value=[]),
             ):
                 runner = CliRunner()
                 result = runner.invoke(
@@ -363,10 +379,10 @@ class TestRunImplAutoPlanIssues:
                     ["run", "--impl", "--repo", _REPO, "--milestone", _MILESTONE],
                 )
 
-        assert result.exit_code == 0, result.output
-        assert calls == ["plan-issues", "impl"]
+        assert result.exit_code != 0
+        assert "--scope" in result.output
 
-    def test_impl_skips_plan_issues_when_issues_exist(self, tmp_path: Path) -> None:
+    def test_impl_runs_when_impl_issues_exist(self, tmp_path: Path) -> None:
         calls: list[str] = []
 
         with patch.dict("os.environ", MINIMAL_ENV, clear=False):
@@ -381,10 +397,6 @@ class TestRunImplAutoPlanIssues:
                 ),
                 patch("brimstone.cli.startup_sequence", return_value=(object(), object())),
                 patch(
-                    "brimstone.cli._run_plan_issues",
-                    side_effect=lambda **kw: calls.append("plan-issues"),
-                ),
-                patch(
                     "brimstone.cli._run_impl_worker",
                     side_effect=lambda **kw: calls.append("impl"),
                 ),
@@ -396,8 +408,7 @@ class TestRunImplAutoPlanIssues:
                 )
 
         assert result.exit_code == 0, result.output
-        assert "plan-issues" not in calls
-        assert "impl" in calls
+        assert calls == ["impl"]
 
 
 # ---------------------------------------------------------------------------
