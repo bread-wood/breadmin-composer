@@ -294,8 +294,7 @@ class TestImplWorkerBeadLifecycle:
 
         store.write_work_bead = spy_write_work_bead  # type: ignore[method-assign]
 
-        # _dispatch_impl_agent is called in a ThreadPoolExecutor; its return value
-        # is unpacked as (issue, branch, worktree_path, result).
+        # _dispatch_impl_agent returns (issue, branch, worktree_path, result)
         def fake_dispatch(
             issue: dict,
             branch: str,
@@ -428,14 +427,8 @@ class TestWatchdogScanExhaustion:
         work_bead = _make_work_bead(issue_number=7, state="claimed", claimed_at=old_claim)
         store.write_work_bead(work_bead)
 
-        # _unclaim_issue calls _gh(["issue", "view", ..., "--json", "assignees"])
-        # and parses stdout as JSON — provide a real string to avoid MagicMock errors.
-        gh_result = MagicMock()
-        gh_result.returncode = 0
-        gh_result.stdout = '{"assignees": []}'
-
         with (
-            patch("brimstone.cli._gh", return_value=gh_result),
+            patch("brimstone.cli._gh", side_effect=_gh_side_effect),
             patch("brimstone.cli.logger.log_conductor_event"),
             patch("brimstone.cli.session.save"),
         ):
