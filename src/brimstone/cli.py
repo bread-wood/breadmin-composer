@@ -4349,22 +4349,74 @@ def _run_plan_issues(
 def _validate_spec_path(spec: str) -> Path:
     """Resolve and validate the ``--spec`` argument.
 
-    Accepts a relative path (resolved from cwd) or an absolute path.  Fails
-    with a :exc:`click.ClickException` if the path does not exist or does not
-    end in ``.md``.
+    Accepts three forms:
+
+    * **Absolute path** — e.g. ``/path/to/spec.md``
+    * **Relative path** — e.g. ``./docs/spec.md`` or ``docs/spec.md`` (resolved
+      from cwd); must exist as a local file.
+    * **GitHub path** — ``owner/repo/path/to/spec.md`` (e.g.
+      ``bread-wood/brimstone-specs/brimstone/v0.2.0-hardened-core.md``).
+      Detected when the value does not start with ``/`` or ``./``, does not
+      exist as a local path, and contains at least two ``/`` separators.
+      The file is fetched via ``gh api`` and written to a temp file whose
+      path is returned.
 
     Args:
         spec: Raw value of the ``--spec`` CLI option.
 
     Returns:
-        Resolved absolute :class:`~pathlib.Path`.
+        Resolved absolute :class:`~pathlib.Path` (local file or temp file for
+        GitHub-fetched content).
 
     Raises:
-        click.ClickException: If the path does not exist or is not a ``.md`` file.
+        click.ClickException: If the path does not exist, cannot be fetched
+            from GitHub, or is not a ``.md`` file.
     """
-    resolved = Path(spec).expanduser().resolve()
-    if not resolved.exists():
-        raise click.ClickException(f"Spec file not found: {resolved}")
+    # Detect GitHub path: no leading / or ./, not an existing local file, and
+    # at least two slash segments (owner/repo/file…)
+    is_local_prefix = spec.startswith("/") or spec.startswith("./") or spec.startswith("../")
+    local_candidate = Path(spec).expanduser().resolve()
+
+    if not is_local_prefix and not local_candidate.exists() and spec.count("/") >= 2:
+        # GitHub path — parse owner/repo and file_path
+        parts = spec.split("/", 2)
+        owner, repo_name, file_path = parts[0], parts[1], parts[2]
+        api_path = f"repos/{owner}/{repo_name}/contents/{file_path}"
+
+        result = subprocess.run(
+            ["gh", "api", api_path, "--jq", ".content"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            detail = result.stderr.strip() or "empty response"
+            raise click.ClickException(
+                f"Could not fetch spec from GitHub ({owner}/{repo_name}/{file_path}): {detail}"
+            )
+
+        # Decode base64 content (GitHub API returns base64 with newlines)
+        decode_result = subprocess.run(
+            ["base64", "-d"],
+            input=result.stdout,
+            capture_output=True,
+            text=True,
+        )
+        if decode_result.returncode != 0:
+            raise click.ClickException(
+                f"Failed to decode spec content from GitHub: {decode_result.stderr.strip()}"
+            )
+
+        suffix = Path(file_path).suffix or ".md"
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False, mode="w", encoding="utf-8")
+        tmp.write(decode_result.stdout)
+        tmp.flush()
+        tmp.close()
+        resolved = Path(tmp.name)
+    else:
+        resolved = local_candidate
+        if not resolved.exists():
+            raise click.ClickException(f"Spec file not found: {resolved}")
+
     if resolved.suffix.lower() != ".md":
         raise click.ClickException(f"Spec file must be a .md file, got: {resolved.name!r}")
     return resolved
