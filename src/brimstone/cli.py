@@ -4613,7 +4613,7 @@ def _check_gate_before_stage(
             )
 
     if stage == "scope" and "design" not in stages_being_run:
-        hld_path = "docs/design/HLD.md"
+        hld_path = f"docs/design/{milestone}/HLD.md"
         if not _doc_exists_on_default_branch(repo, hld_path, default_branch):
             raise click.ClickException(
                 f"Design doc '{hld_path}' does not exist on branch '{default_branch}'. "
@@ -4815,7 +4815,7 @@ def run(
                 click.echo(f"[run] {stage}: already complete, skipping", err=True)
                 continue
             if stage == "design" and _doc_exists_on_default_branch(
-                repo_ref, "docs/design/HLD.md", default_branch
+                repo_ref, f"docs/design/{milestone}/HLD.md", default_branch
             ):
                 click.echo(f"[run] {stage}: already complete, skipping", err=True)
                 continue
