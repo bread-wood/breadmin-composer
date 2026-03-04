@@ -70,7 +70,7 @@ class TestDesignWorkerGates:
             patch("brimstone.cli._unclaim_issue"),
             patch(
                 "brimstone.cli._dispatch_design_agent",
-                return_value=fake_run_result(is_error=True),
+                return_value=(None, "", "", fake_run_result(is_error=True)),
             ),
         ):
             with pytest.raises(SystemExit):
@@ -94,10 +94,10 @@ class TestDesignWorkerHLDPhase:
 
         def spy_dispatch(
             issue: dict, branch: str, worktree_path: str, **kwargs: object
-        ) -> MagicMock:
+        ) -> tuple:
             worktrees_seen.append(worktree_path)
             assert Path(worktree_path).is_dir(), "Worktree must exist when agent is dispatched"
-            return fake_run_result()
+            return issue, branch, worktree_path, fake_run_result()
 
         # doc_exists calls:
         # 1. Phase 1 gate: HLD on branch? → False (run HLD phase)
@@ -144,9 +144,9 @@ class TestDesignWorkerHLDPhase:
 
         def spy_dispatch(
             issue: dict, branch: str, worktree_path: str, skill_name: str, **kwargs: object
-        ) -> MagicMock:
+        ) -> tuple:
             dispatch_called.append(skill_name)
-            return fake_run_result()
+            return issue, branch, worktree_path, fake_run_result()
 
         # doc_exists: HLD already on branch (Phase 1 skip + Gate 2 pass)
         with (
@@ -181,10 +181,10 @@ class TestDesignWorkerLLDPhase:
 
         def spy_dispatch(
             issue: dict, branch: str, worktree_path: str, **kwargs: object
-        ) -> MagicMock:
+        ) -> tuple:
             worktrees_seen.append(worktree_path)
             assert Path(worktree_path).is_dir()
-            return fake_run_result()
+            return issue, branch, worktree_path, fake_run_result()
 
         # doc_exists calls:
         # 1. Phase 1 gate (HLD check) → True (skip HLD)

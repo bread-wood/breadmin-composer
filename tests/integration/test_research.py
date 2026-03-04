@@ -34,11 +34,12 @@ from tests.integration.conftest import (
 _BASE_PATCHES = {
     "milestone_exists": "brimstone.cli._milestone_exists",
     "default_branch": "brimstone.cli._get_default_branch_for_repo",
-    "in_progress": "brimstone.cli._list_in_progress_research_issues",
+    "in_progress": "brimstone.cli._list_in_progress_issues",
     "claim": "brimstone.cli._claim_issue",
     "unclaim": "brimstone.cli._unclaim_issue",
     "find_pr": "brimstone.cli._find_pr_for_issue",
-    "triage": "brimstone.cli._apply_triage_rubric",
+    "merged_pr": "brimstone.cli._pr_merged_for_issue",
+    "triage": "brimstone.cli._triage_review_comments",
     "file_design": "brimstone.cli._file_design_issue_if_missing",
     "runner": "brimstone.cli.runner.run",
     "build_env": "brimstone.cli.build_subprocess_env",
@@ -359,8 +360,10 @@ class TestResearchWorkerErrorHandling:
             patch(_BASE_PATCHES["default_branch"], return_value="mainline"),
             patch(_BASE_PATCHES["in_progress"], return_value=[stale]),
             patch(_BASE_PATCHES["unclaim"], side_effect=fake_unclaim),
-            # _find_pr_for_issue returns None → no PR → unclaim
+            # _find_pr_for_issue returns None → no open PR
             patch(_BASE_PATCHES["find_pr"], return_value=None),
+            # _pr_merged_for_issue returns False → no merged PR → unclaim
+            patch(_BASE_PATCHES["merged_pr"], return_value=False),
             patch("brimstone.cli._list_open_research_issues", return_value=[]),
             patch("brimstone.cli._run_completion_gate"),
         ):

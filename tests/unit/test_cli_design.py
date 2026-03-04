@@ -123,6 +123,7 @@ def make_design_issue(number: int, title: str) -> dict:
 
 _DESIGN_PATCHES = {
     "count_research": "brimstone.cli._count_all_open_research_issues",
+    "list_research": "brimstone.cli._list_open_research_issues",
     "default_branch": "brimstone.cli._get_default_branch_for_repo",
     "repo_root": "brimstone.cli._get_repo_root",
     "doc_exists": "brimstone.cli._doc_exists_on_default_branch",
@@ -147,12 +148,28 @@ _DESIGN_PATCHES = {
 
 
 class TestDesignWorkerGate1:
-    def test_aborts_when_research_open(self, tmp_path: Path, capsys) -> None:
+    def test_aborts_when_blocking_research_open(self, tmp_path: Path, capsys) -> None:
+        """Gate fires when there are open research issues without [DEFERRED] tag."""
         config = make_config(tmp_path)
         checkpoint = make_checkpoint()
 
+        def _issue(n: int, body: str) -> dict:
+            return {
+                "number": n,
+                "title": f"Research: {n}",
+                "body": body,
+                "labels": [],
+                "assignees": [],
+            }
+
+        blocking_issues = [
+            _issue(10, "no tag"),
+            _issue(11, "[BLOCKS_IMPL]"),
+            _issue(12, "also no tag"),
+        ]
+
         with (
-            patch(_DESIGN_PATCHES["count_research"], return_value=3),
+            patch(_DESIGN_PATCHES["list_research"], return_value=blocking_issues),
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
         ):
@@ -169,12 +186,48 @@ class TestDesignWorkerGate1:
         assert "research" in captured.err.lower()
         assert "3" in captured.err
 
+    def test_proceeds_when_only_v2_research_remain(self, tmp_path: Path) -> None:
+        """Gate passes when only [DEFERRED] issues remain open."""
+        config = make_config(tmp_path)
+        checkpoint = make_checkpoint()
+
+        v2_only = [
+            {
+                "number": 99,
+                "title": "Research: deferred",
+                "body": "[DEFERRED]",
+                "labels": [],
+                "assignees": [],
+            },
+        ]
+
+        with (
+            patch(_DESIGN_PATCHES["list_research"], return_value=v2_only),
+            patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["doc_exists"], return_value=True),  # HLD exists → skip Phase 1
+            patch(_DESIGN_PATCHES["list_design"], return_value=[]),
+            patch(_DESIGN_PATCHES["log_event"]),
+            patch(_DESIGN_PATCHES["save_session"]),
+        ):
+            # No LLD issues → SystemExit(1), but Gate 1 passed
+            with pytest.raises(SystemExit) as exc_info:
+                _run_design_worker(
+                    repo="owner/repo",
+                    milestone="v1",
+                    config=config,
+                    checkpoint=checkpoint,
+                    dry_run=False,
+                )
+        # Exits because no LLD issues, not because Gate 1
+        assert exc_info.value.code == 1
+
     def test_proceeds_when_no_open_research(self, tmp_path: Path) -> None:
         config = make_config(tmp_path)
         checkpoint = make_checkpoint()
 
         with (
-            patch(_DESIGN_PATCHES["count_research"], return_value=0),
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
             patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
             patch(_DESIGN_PATCHES["doc_exists"], return_value=True),  # HLD exists → skip Phase 1
@@ -243,7 +296,7 @@ class TestDesignWorkerPhase1:
         lld_issue = make_design_issue(20, "Design: LLD for parser")
 
         with (
-            patch(_DESIGN_PATCHES["count_research"], return_value=0),
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
             patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
             patch(_DESIGN_PATCHES["doc_exists"], side_effect=doc_exists),
@@ -258,7 +311,7 @@ class TestDesignWorkerPhase1:
             patch(_DESIGN_PATCHES["save_session"]),
             patch(_DESIGN_PATCHES["slugify"], return_value="design-lld-parser"),
         ):
-            mock_dispatch.return_value = make_run_result()
+            mock_dispatch.return_value = (None, "", "", make_run_result())
             _run_design_worker(
                 repo="owner/repo",
                 milestone="v1",
@@ -293,7 +346,7 @@ class TestDesignWorkerPhase1:
             return []
 
         with (
-            patch(_DESIGN_PATCHES["count_research"], return_value=0),
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
             patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
             patch(_DESIGN_PATCHES["doc_exists"], side_effect=doc_exists),
@@ -304,7 +357,10 @@ class TestDesignWorkerPhase1:
             patch(_DESIGN_PATCHES["find_pr"], return_value=1),
             patch(_DESIGN_PATCHES["monitor_pr"], return_value=True),
             patch(_DESIGN_PATCHES["remove_wt"]),
-            patch(_DESIGN_PATCHES["dispatch_agent"], return_value=make_run_result()) as mock_da,
+            patch(
+                _DESIGN_PATCHES["dispatch_agent"],
+                return_value=(None, "", "", make_run_result()),
+            ) as mock_da,
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
             patch(_DESIGN_PATCHES["slugify"], return_value="design-hld-v1"),
@@ -336,7 +392,7 @@ class TestDesignWorkerPhase1:
         hld_issue = make_design_issue(10, "Design: HLD for v1")
 
         with (
-            patch(_DESIGN_PATCHES["count_research"], return_value=0),
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
             patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
             patch(_DESIGN_PATCHES["doc_exists"], return_value=False),
@@ -347,7 +403,7 @@ class TestDesignWorkerPhase1:
             patch(_DESIGN_PATCHES["remove_wt"]),
             patch(
                 _DESIGN_PATCHES["dispatch_agent"],
-                return_value=make_run_result(is_error=True, subtype="error_timeout"),
+                return_value=(None, "", "", make_run_result(is_error=True, subtype="error_timeout")),
             ),
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
@@ -371,7 +427,7 @@ class TestDesignWorkerPhase1:
 
         # Simulate: HLD was skipped (no issue found) but doc still not on branch
         with (
-            patch(_DESIGN_PATCHES["count_research"], return_value=0),
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
             patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
             patch(_DESIGN_PATCHES["doc_exists"], return_value=False),
@@ -429,7 +485,7 @@ class TestDesignWorkerPhase2:
             return "HLD" in path  # HLD present, no LLD docs yet
 
         with (
-            patch(_DESIGN_PATCHES["count_research"], return_value=0),
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
             patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
             patch(_DESIGN_PATCHES["doc_exists"], side_effect=doc_exists),
@@ -442,7 +498,10 @@ class TestDesignWorkerPhase2:
                 _DESIGN_PATCHES["create_wt"],
                 side_effect=["/wt/20", "/wt/21"],
             ),
-            patch(_DESIGN_PATCHES["dispatch_agent"], return_value=make_run_result()) as mock_da,
+            patch(
+                _DESIGN_PATCHES["dispatch_agent"],
+                return_value=(None, "", "", make_run_result()),
+            ) as mock_da,
             patch(_DESIGN_PATCHES["find_pr"], return_value=5),
             patch(_DESIGN_PATCHES["monitor_pr"], return_value=True),
             patch(_DESIGN_PATCHES["remove_wt"]),
@@ -481,14 +540,17 @@ class TestDesignWorkerPhase2:
             return "HLD" in path or "parser" in path
 
         with (
-            patch(_DESIGN_PATCHES["count_research"], return_value=0),
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
             patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
             patch(_DESIGN_PATCHES["doc_exists"], side_effect=doc_exists),
             patch("brimstone.cli._list_open_design_issues", return_value=lld_issues),
             patch(_DESIGN_PATCHES["claim"]),
             patch(_DESIGN_PATCHES["create_wt"], return_value="/wt/21"),
-            patch(_DESIGN_PATCHES["dispatch_agent"], return_value=make_run_result()) as mock_da,
+            patch(
+                _DESIGN_PATCHES["dispatch_agent"],
+                return_value=(None, "", "", make_run_result()),
+            ) as mock_da,
             patch(_DESIGN_PATCHES["find_pr"], return_value=5),
             patch(_DESIGN_PATCHES["monitor_pr"], return_value=True),
             patch(_DESIGN_PATCHES["remove_wt"]),
@@ -516,7 +578,7 @@ class TestDesignWorkerPhase2:
         checkpoint = make_checkpoint()
 
         with (
-            patch(_DESIGN_PATCHES["count_research"], return_value=0),
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
             patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
             patch(_DESIGN_PATCHES["doc_exists"], return_value=True),  # HLD present
@@ -548,14 +610,17 @@ class TestDesignWorkerPhase2:
             return "HLD" in path
 
         with (
-            patch(_DESIGN_PATCHES["count_research"], return_value=0),
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
             patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
             patch(_DESIGN_PATCHES["doc_exists"], side_effect=doc_exists),
             patch("brimstone.cli._list_open_design_issues", return_value=[lld_issue]),
             patch(_DESIGN_PATCHES["claim"]),
             patch(_DESIGN_PATCHES["create_wt"], return_value="/wt/20"),
-            patch(_DESIGN_PATCHES["dispatch_agent"], return_value=make_run_result()),
+            patch(
+                _DESIGN_PATCHES["dispatch_agent"],
+                return_value=(None, "", "", make_run_result()),
+            ),
             patch(_DESIGN_PATCHES["find_pr"], return_value=5),
             patch(_DESIGN_PATCHES["monitor_pr"], return_value=True),
             patch(_DESIGN_PATCHES["remove_wt"]),

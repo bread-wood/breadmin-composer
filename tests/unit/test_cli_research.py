@@ -2,7 +2,6 @@
 
 Tests cover:
 - Issue selection filters (label, milestone, no assignee, not in-progress)
-- Triage rubric scoring (mock runner.run returning different scores)
 - Completion gate logic (zero blocking → stop)
 - Rate-limit requeue (record_429 called, issue unclaimed)
 - Resume: stale in-progress issues with no PR are unclaimed for re-dispatch
@@ -19,16 +18,13 @@ import pytest
 
 from brimstone.cli import (
     UsageGovernor,
-    _apply_triage_rubric,
     _classify_blocking_issues,
     _filter_unblocked,
     _list_open_research_issues,
-    _list_triage_issues,
     _parse_dependencies,
     _run_completion_gate,
     _run_research_worker,
     _sanitize_issue_body,
-    _score_triage_issue,
     _sort_issues,
 )
 from brimstone.config import Config
@@ -326,192 +322,6 @@ class TestListOpenResearchIssues:
 
 
 # ---------------------------------------------------------------------------
-# _list_triage_issues
-# ---------------------------------------------------------------------------
-
-
-class TestListTriageIssues:
-    def test_returns_parsed_issues(self) -> None:
-        issues = [
-            {"number": 10, "title": "Follow-up A", "body": "...", "labels": [{"name": "triage"}]}
-        ]
-        gh_output = json.dumps(issues)
-        with patch("brimstone.cli.subprocess.run", return_value=make_gh_result(stdout=gh_output)):
-            result = _list_triage_issues("owner/repo")
-        assert len(result) == 1
-        assert result[0]["number"] == 10
-
-    def test_returns_empty_on_failure(self) -> None:
-        with patch("brimstone.cli.subprocess.run", return_value=make_gh_result(returncode=1)):
-            result = _list_triage_issues("owner/repo")
-        assert result == []
-
-
-# ---------------------------------------------------------------------------
-# _score_triage_issue
-# ---------------------------------------------------------------------------
-
-
-class TestScoreTriageIssue:
-    def _make_score_result(self, score: int, q_answers: str = "") -> RunResult:
-        """Make a RunResult with SCORE: N in the result text."""
-        q_text = q_answers or f"Q1: YES\nQ2: YES\nQ3: NO\nSCORE: {score}\n"
-        return make_run_result(result_text=q_text)
-
-    def test_returns_score_from_runner_output(self) -> None:
-        config = make_config()
-        checkpoint = make_checkpoint()
-        issue = make_issue(10, title="Follow-up", body="Does X affect Y?")
-
-        with patch("brimstone.cli.runner.run", return_value=self._make_score_result(2)):
-            with patch("brimstone.cli.build_subprocess_env", return_value={}):
-                score = _score_triage_issue(issue, "owner/repo", "MVP Research", config, checkpoint)
-
-        assert score == 2
-
-    def test_returns_3_for_all_yes(self) -> None:
-        config = make_config()
-        checkpoint = make_checkpoint()
-        issue = make_issue(11, body="Critical")
-
-        result_text = "Q1: YES\nQ2: YES\nQ3: YES\nSCORE: 3\n"
-        with (
-            patch(
-                "brimstone.cli.runner.run",
-                return_value=make_run_result(result_text=result_text),
-            ),
-            patch("brimstone.cli.build_subprocess_env", return_value={}),
-        ):
-            score = _score_triage_issue(issue, "owner/repo", "MVP Research", config, checkpoint)
-
-        assert score == 3
-
-    def test_returns_0_for_all_no(self) -> None:
-        config = make_config()
-        checkpoint = make_checkpoint()
-        issue = make_issue(12, body="Trivial")
-
-        result_text = "Q1: NO\nQ2: NO\nQ3: NO\nSCORE: 0\n"
-        with (
-            patch(
-                "brimstone.cli.runner.run",
-                return_value=make_run_result(result_text=result_text),
-            ),
-            patch("brimstone.cli.build_subprocess_env", return_value={}),
-        ):
-            score = _score_triage_issue(issue, "owner/repo", "MVP Research", config, checkpoint)
-
-        assert score == 0
-
-    def test_returns_2_on_runner_failure(self) -> None:
-        """Conservative: keep on runner failure (score=2)."""
-        config = make_config()
-        checkpoint = make_checkpoint()
-        issue = make_issue(13, body="Some body")
-
-        err_result = make_run_result(is_error=True, subtype="error_during_execution")
-        with (
-            patch("brimstone.cli.runner.run", return_value=err_result),
-            patch("brimstone.cli.build_subprocess_env", return_value={}),
-        ):
-            score = _score_triage_issue(issue, "owner/repo", "MVP Research", config, checkpoint)
-
-        assert score == 2
-
-    def test_returns_2_in_dry_run_mode(self) -> None:
-        """Dry run always returns 2 without calling runner."""
-        config = make_config()
-        checkpoint = make_checkpoint()
-        issue = make_issue(14)
-
-        with patch("brimstone.cli.runner.run") as mock_run:
-            score = _score_triage_issue(
-                issue, "owner/repo", "MVP Research", config, checkpoint, dry_run=True
-            )
-
-        mock_run.assert_not_called()
-        assert score == 2
-
-
-# ---------------------------------------------------------------------------
-# _apply_triage_rubric
-# ---------------------------------------------------------------------------
-
-
-class TestApplyTriageRubric:
-    def test_closes_low_score_issues(self) -> None:
-        """Issues scoring < 2 should be closed with wont-research."""
-        config = make_config()
-        checkpoint = make_checkpoint()
-        triage_issues = [make_issue(20, title="Low-value followup")]
-
-        with (
-            patch("brimstone.cli._list_triage_issues", return_value=triage_issues),
-            patch("brimstone.cli._score_triage_issue", return_value=1),
-            patch("brimstone.cli._close_issue_wont_research") as mock_close,
-            patch("brimstone.cli.logger.log_conductor_event"),
-        ):
-            _apply_triage_rubric("owner/repo", "MVP Research", config, checkpoint)
-
-        mock_close.assert_called_once_with(
-            repo="owner/repo",
-            issue_number=20,
-            score=1,
-            reason="Below threshold for standalone research.",
-        )
-
-    def test_keeps_high_score_issues(self) -> None:
-        """Issues scoring >= 2 should have triage label removed."""
-        config = make_config()
-        checkpoint = make_checkpoint()
-        triage_issues = [make_issue(21, title="High-value followup")]
-
-        with (
-            patch("brimstone.cli._list_triage_issues", return_value=triage_issues),
-            patch("brimstone.cli._score_triage_issue", return_value=3),
-            patch("brimstone.cli._keep_triage_issue") as mock_keep,
-            patch("brimstone.cli.logger.log_conductor_event"),
-        ):
-            _apply_triage_rubric("owner/repo", "MVP Research", config, checkpoint)
-
-        mock_keep.assert_called_once_with(
-            repo="owner/repo",
-            issue_number=21,
-            milestone="MVP Research",
-        )
-
-    def test_boundary_score_2_is_kept(self) -> None:
-        """Score of exactly 2 should keep the issue."""
-        config = make_config()
-        checkpoint = make_checkpoint()
-        triage_issues = [make_issue(22)]
-
-        with (
-            patch("brimstone.cli._list_triage_issues", return_value=triage_issues),
-            patch("brimstone.cli._score_triage_issue", return_value=2),
-            patch("brimstone.cli._keep_triage_issue") as mock_keep,
-            patch("brimstone.cli._close_issue_wont_research") as mock_close,
-            patch("brimstone.cli.logger.log_conductor_event"),
-        ):
-            _apply_triage_rubric("owner/repo", "MVP Research", config, checkpoint)
-
-        mock_keep.assert_called_once()
-        mock_close.assert_not_called()
-
-    def test_handles_empty_triage_list(self) -> None:
-        """Empty triage list should not call close or keep."""
-        config = make_config()
-        checkpoint = make_checkpoint()
-
-        with (
-            patch("brimstone.cli._list_triage_issues", return_value=[]),
-            patch("brimstone.cli._close_issue_wont_research") as mock_close,
-            patch("brimstone.cli._keep_triage_issue") as mock_keep,
-        ):
-            _apply_triage_rubric("owner/repo", "MVP Research", config, checkpoint)
-
-        mock_close.assert_not_called()
-        mock_keep.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -520,11 +330,11 @@ class TestApplyTriageRubric:
 
 
 class TestClassifyBlockingIssues:
-    def test_blocks_impl_tag_marks_as_blocking(self) -> None:
-        """Issues with [BLOCKS_IMPL] in body are classified as blocking without runner call."""
+    def test_no_tag_is_blocking_by_default(self) -> None:
+        """Issues without [DEFERRED] are blocking by default."""
         config = make_config()
         checkpoint = make_checkpoint()
-        issues = [make_issue(1, body="[BLOCKS_IMPL] — critical design question")]
+        issues = [make_issue(1, body="Is X secure?")]
 
         blocking, non_blocking = _classify_blocking_issues(
             issues, "owner/repo", "MVP Research", config, checkpoint
@@ -534,61 +344,49 @@ class TestClassifyBlockingIssues:
         assert len(non_blocking) == 0
         assert blocking[0]["number"] == 1
 
-    def test_runner_blocking_response(self) -> None:
-        """Runner returning BLOCKING classifies the issue as blocking."""
+    def test_blocks_impl_tag_is_blocking(self) -> None:
+        """Issues with [BLOCKS_IMPL] are blocking (conservative default still applies)."""
         config = make_config()
         checkpoint = make_checkpoint()
-        issues = [make_issue(2, body="Is X secure?")]
+        issues = [make_issue(2, body="[BLOCKS_IMPL] — critical design question")]
 
-        blocking_result = make_run_result(result_text="BLOCKING\nBecause it affects auth design.")
-        with (
-            patch("brimstone.cli.runner.run", return_value=blocking_result),
-            patch("brimstone.cli.build_subprocess_env", return_value={}),
-        ):
-            blocking, non_blocking = _classify_blocking_issues(
-                issues, "owner/repo", "MVP Research", config, checkpoint
-            )
+        blocking, non_blocking = _classify_blocking_issues(
+            issues, "owner/repo", "MVP Research", config, checkpoint
+        )
 
         assert len(blocking) == 1
         assert len(non_blocking) == 0
 
-    def test_runner_non_blocking_response(self) -> None:
-        """Runner returning NON-BLOCKING classifies the issue as non-blocking."""
+    def test_deferred_tag_is_non_blocking(self) -> None:
+        """Issues tagged [DEFERRED] are explicitly non-blocking."""
         config = make_config()
         checkpoint = make_checkpoint()
-        issues = [make_issue(3, body="What is the exact retry interval?")]
+        issues = [make_issue(3, body="[DEFERRED] — nice to know but not urgent")]
 
-        non_blocking_result = make_run_result(
-            result_text="NON-BLOCKING\nCan use reasonable default."
+        blocking, non_blocking = _classify_blocking_issues(
+            issues, "owner/repo", "MVP Research", config, checkpoint
         )
-        with (
-            patch("brimstone.cli.runner.run", return_value=non_blocking_result),
-            patch("brimstone.cli.build_subprocess_env", return_value={}),
-        ):
-            blocking, non_blocking = _classify_blocking_issues(
-                issues, "owner/repo", "MVP Research", config, checkpoint
-            )
 
         assert len(blocking) == 0
         assert len(non_blocking) == 1
 
-    def test_runner_failure_defaults_to_non_blocking(self) -> None:
-        """Runner failure is treated conservatively as non-blocking."""
+    def test_mixed_tags(self) -> None:
+        """Mix of tagged and untagged issues is classified correctly."""
         config = make_config()
         checkpoint = make_checkpoint()
-        issues = [make_issue(4, body="Some question")]
+        issues = [
+            make_issue(4, body="[DEFERRED] deferred"),
+            make_issue(5, body="[BLOCKS_IMPL] critical"),
+            make_issue(6, body="no tag — blocking by default"),
+        ]
 
-        err_result = make_run_result(is_error=True, subtype="error_during_execution")
-        with (
-            patch("brimstone.cli.runner.run", return_value=err_result),
-            patch("brimstone.cli.build_subprocess_env", return_value={}),
-        ):
-            blocking, non_blocking = _classify_blocking_issues(
-                issues, "owner/repo", "MVP Research", config, checkpoint
-            )
+        blocking, non_blocking = _classify_blocking_issues(
+            issues, "owner/repo", "MVP Research", config, checkpoint
+        )
 
-        assert len(blocking) == 0
+        assert len(blocking) == 2
         assert len(non_blocking) == 1
+        assert non_blocking[0]["number"] == 4
 
     def test_dry_run_returns_all_non_blocking(self) -> None:
         """In dry_run mode all issues are treated as non-blocking."""
@@ -596,12 +394,10 @@ class TestClassifyBlockingIssues:
         checkpoint = make_checkpoint()
         issues = [make_issue(5, body="[BLOCKS_IMPL]"), make_issue(6, body="normal")]
 
-        with patch("brimstone.cli.runner.run") as mock_run:
-            blocking, non_blocking = _classify_blocking_issues(
-                issues, "owner/repo", "MVP Research", config, checkpoint, dry_run=True
-            )
+        blocking, non_blocking = _classify_blocking_issues(
+            issues, "owner/repo", "MVP Research", config, checkpoint, dry_run=True
+        )
 
-        mock_run.assert_not_called()
         assert len(blocking) == 0
         assert len(non_blocking) == 2
 
@@ -811,7 +607,6 @@ class TestRunResearchWorkerIssueSelection:
             patch("brimstone.cli._sort_issues", return_value=[blocking_issue]),
             patch("brimstone.cli._claim_issue") as mock_claim,
             patch("brimstone.cli.runner.run", return_value=success_result),
-            patch("brimstone.cli._apply_triage_rubric"),
             patch("brimstone.cli._run_completion_gate"),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
             patch("brimstone.cli.logger.log_conductor_event"),
@@ -827,8 +622,8 @@ class TestRunResearchWorkerIssueSelection:
 
         mock_claim.assert_called_once_with(repo="owner/repo", issue_number=1)
 
-    def test_applies_triage_after_success(self, tmp_path: Path) -> None:
-        """After a successful run, triage rubric should be applied."""
+    def test_monitors_pr_after_success(self, tmp_path: Path) -> None:
+        """After a successful run, PR monitoring should be called."""
         config = make_config()
         object.__setattr__(config, "checkpoint_dir", tmp_path)
         object.__setattr__(config, "log_dir", tmp_path / "logs")
@@ -860,8 +655,7 @@ class TestRunResearchWorkerIssueSelection:
             patch("brimstone.cli._remove_worktree"),
             patch("brimstone.cli.runner.run", return_value=success_result),
             patch("brimstone.cli._find_pr_for_issue", return_value=(99, "1-test-issue")),
-            patch("brimstone.cli._monitor_pr", return_value=True),
-            patch("brimstone.cli._apply_triage_rubric") as mock_triage,
+            patch("brimstone.cli._monitor_pr", return_value=True) as mock_monitor,
             patch("brimstone.cli._run_completion_gate"),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
             patch("brimstone.cli.logger.log_conductor_event"),
@@ -875,7 +669,7 @@ class TestRunResearchWorkerIssueSelection:
                 checkpoint=checkpoint,
             )
 
-        mock_triage.assert_called_once()
+        mock_monitor.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -1256,7 +1050,7 @@ class TestResumeUnclaim:
         unclaim_calls: list[int] = []
 
         with (
-            patch("brimstone.cli._list_in_progress_research_issues", return_value=[stale]),
+            patch("brimstone.cli._list_in_progress_issues", return_value=[stale]),
             patch("brimstone.cli._find_pr_for_issue", return_value=(99, "42-stale-branch")),
             patch(
                 "brimstone.cli._monitor_pr",
@@ -1297,7 +1091,7 @@ class TestResumeUnclaim:
         monitor_calls: list[int] = []
 
         with (
-            patch("brimstone.cli._list_in_progress_research_issues", return_value=[stale]),
+            patch("brimstone.cli._list_in_progress_issues", return_value=[stale]),
             patch("brimstone.cli._find_pr_for_issue", return_value=None),
             patch(
                 "brimstone.cli._unclaim_issue",
@@ -1345,7 +1139,7 @@ class TestResumeUnclaim:
 
         with (
             patch(
-                "brimstone.cli._list_in_progress_research_issues",
+                "brimstone.cli._list_in_progress_issues",
                 return_value=[stale_with_pr, stale_no_pr],
             ),
             patch("brimstone.cli._find_pr_for_issue", side_effect=fake_find_pr),
