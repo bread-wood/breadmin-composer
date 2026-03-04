@@ -4747,9 +4747,7 @@ def _validate_spec_path(spec: str) -> Path:
         content = base64.b64decode(result.stdout.strip()).decode()
         suffix = Path(file_path).suffix
         stem = Path(file_path).stem
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=suffix, prefix=f"{stem}-", delete=False
-        )
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=suffix, prefix=f"{stem}-", delete=False)
         tmp.write(content)
         tmp.close()
         tmp_path = Path(tmp.name)
