@@ -6099,27 +6099,55 @@ def run(
                     store=_store,
                 )
             else:
-                # Completion check — skip if stage is already done
+                # Completion check — skip if stage is already done.
+                # Beads are the source of truth; fall back to GitHub issue counts
+                # only when no beads exist for the stage yet.
                 if not dry_run:
-                    if stage == "research" and (
-                        _count_open_issues_by_label(repo_ref, ms, RESEARCH_LABEL) == 0
-                    ):
-                        click.echo(f"[run] {stage} ({ms}): already complete, skipping", err=True)
-                        continue
-                    if (
-                        stage == "design"
-                        and _doc_exists_on_default_branch(
-                            repo_ref, f"docs/design/{ms}/HLD.md", default_branch
+                    _skip_store = make_bead_store(config, repo_ref) if repo_ref else None
+                    if stage == "research":
+                        _r_beads = (
+                            _skip_store.list_work_beads(milestone=ms, stage="research")
+                            if _skip_store
+                            else []
                         )
-                        and _count_open_issues_by_label(repo_ref, ms, DESIGN_LABEL) == 0
-                    ):
-                        click.echo(f"[run] {stage} ({ms}): already complete, skipping", err=True)
-                        continue
-                    if stage == "scope" and _count_all_issues_by_label(repo_ref, ms, IMPL_LABEL):
-                        click.echo(
-                            f"[run] {stage} ({ms}): impl issues already exist, skipping", err=True
+                        _r_done = _r_beads and not any(
+                            b.state in ("open", "claimed") for b in _r_beads
                         )
-                        continue
+                        if _r_done:
+                            click.echo(
+                                f"[run] {stage} ({ms}): already complete, skipping", err=True
+                            )
+                            continue
+                    if stage == "design":
+                        _d_beads = (
+                            _skip_store.list_work_beads(milestone=ms, stage="design")
+                            if _skip_store
+                            else []
+                        )
+                        _d_done = (
+                            _d_beads
+                            and not any(b.state in ("open", "claimed") for b in _d_beads)
+                            and _doc_exists_on_default_branch(
+                                repo_ref, f"docs/design/{ms}/HLD.md", default_branch
+                            )
+                        )
+                        if _d_done:
+                            click.echo(
+                                f"[run] {stage} ({ms}): already complete, skipping", err=True
+                            )
+                            continue
+                    if stage == "scope":
+                        _i_beads = (
+                            _skip_store.list_work_beads(milestone=ms, stage="impl")
+                            if _skip_store
+                            else []
+                        )
+                        if _i_beads:
+                            click.echo(
+                                f"[run] {stage} ({ms}): impl issues already exist, skipping",
+                                err=True,
+                            )
+                            continue
 
                 # Gate check — only when prerequisite is not also in this run
                 if not dry_run:
