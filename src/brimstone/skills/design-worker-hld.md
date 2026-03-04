@@ -1,5 +1,7 @@
 Write the High-Level Design (HLD) document for a milestone and file LLD issues for each module.
 
+**Do NOT use the Agent tool. Do NOT spawn sub-agents.**
+
 ## When to Run
 
 Dispatched by design-worker Phase 1 after all research issues for the milestone are closed.
@@ -11,35 +13,32 @@ From the session prompt:
 - `Milestone` — the version being designed (e.g. `calculator-v0.1.x`)
 - `Issue` — the `Design: HLD for <milestone>` GitHub issue number
 - `Branch` — the branch to commit to
+- `Working Directory` — absolute path to the isolated worktree (already checked out)
 
 ## Execution
 
-### Step 0 — Check Out Branch
+### Step 0 — Enter Your Working Directory
 
 ```bash
-DEFAULT_BRANCH=$(gh repo view --repo <owner>/<repo> --json defaultBranchRef --jq '.defaultBranchRef.name')
-git fetch origin
-git checkout <branch>
-git rebase origin/$DEFAULT_BRANCH
+cd <Working Directory from Session Parameters>
 ```
 
-### Step 1 — Read Research Docs
+The branch is already checked out. Do NOT run `git checkout` or `git rebase`.
 
-Fetch and read every research doc for this milestone in `docs/research/<milestone>/`:
+### Step 1 — Read Research Docs and Spec
 
-```bash
-# List research docs for this milestone
-gh api repos/<owner>/<repo>/contents/docs/research/<milestone> --jq '.[].name'
-
-# Read each doc
-gh api repos/<owner>/<repo>/contents/docs/research/<milestone>/<filename> --jq '.content' | base64 -d
-```
-
-Also read the spec and CLAUDE.md:
+Read every research doc for this milestone from your working directory:
 
 ```bash
-gh api repos/<owner>/<repo>/contents/docs/specs/<version>.md --jq '.content' | base64 -d
-gh api repos/<owner>/<repo>/contents/CLAUDE.md --jq '.content' | base64 -d
+# List and read all research docs
+ls docs/research/<milestone>/
+cat docs/research/<milestone>/*.md
+
+# Read the spec
+cat docs/specs/*.md
+
+# Read CLAUDE.md if it exists
+cat CLAUDE.md 2>/dev/null || true
 ```
 
 ### Step 2 — Write the HLD
@@ -84,8 +83,8 @@ Any design decisions deferred to LLD.
 
 ```bash
 git add docs/design/<milestone>/HLD.md
-git commit -m "docs: add HLD for <milestone> (Closes #<issue_number>)"
-git push
+git commit -m "docs: add HLD for <milestone> (Closes #<issue_number>) [skip ci]"
+git push -u origin <branch>
 ```
 
 ### Step 4 — File LLD Issues
@@ -126,6 +125,7 @@ done
 ### Step 5 — Create PR
 
 ```bash
+DEFAULT_BRANCH=$(gh repo view --repo <owner>/<repo> --json defaultBranchRef --jq '.defaultBranchRef.name')
 gh pr create \
   --repo <owner>/<repo> \
   --title "Design: HLD for <milestone>" \

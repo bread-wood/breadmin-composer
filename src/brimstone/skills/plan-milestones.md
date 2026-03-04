@@ -179,6 +179,24 @@ For each genuine unknown identified above, apply the `[BLOCKS_IMPL]` filter befo
 > an implementation task. Skip questions answerable in seconds or that only affect
 > fine-grained implementation details.
 
+**Assign a priority label** to each issue before filing:
+
+| Label | When to use |
+|-------|-------------|
+| `P0` | Blocks all other research; must complete first |
+| `P1` | High — foundational, other issues depend on it |
+| `P2` | Normal — important but no hard dependents |
+| `P3` | Low — useful but can slip without blocking impl |
+
+**File issues in dependency order** — issues that others depend on must be filed first so
+their issue numbers are known. Capture each number immediately after creation:
+
+```bash
+ISSUE_35=$(gh issue create ... | grep -oE '[0-9]+$')
+```
+
+Then reference captured numbers in dependent issues' `## Dependencies` sections.
+
 For each issue that passes the filter, check for a duplicate before filing:
 
 ```bash
@@ -189,7 +207,7 @@ else
   gh issue create \
     --repo <owner>/<repo> \
     --title "$TITLE" \
-    --label "stage/research" \
+    --label "stage/research,<P0|P1|P2|P3>" \
     --milestone "<Version>" \
     --body "$(cat <<'EOF'
 ## Why This Matters
@@ -220,10 +238,11 @@ Aim for 4–10 well-scoped issues that together give design-worker complete cove
 ### Step 5 — Report
 
 Print:
-- Milestone created (name, goal)
-- All research issues filed (numbers, titles, one-line rationale)
+- Milestone created or updated (name, goal)
+- **Newly filed** research issues only (numbers, titles, priority, one-line rationale) — do not count pre-existing issues here
+- Pre-existing issues retained (numbers, titles) — listed separately
 - Scope boundaries: what's in, what's out, what's deferred
-- Suggested dispatch order: which issues to send to research-worker first (dependency order)
+- Suggested dispatch order: which issues to send to research-worker first (dependency order, reflecting the priority labels actually applied)
 
 
 ## Constraints
@@ -234,6 +253,9 @@ Print:
   infer and file every research question needed for design-worker to have complete coverage
 - **File an issue per topic, not per sub-question** — group related questions; aim for 4–10 issues
 - **`[BLOCKS_IMPL]` filter** — skip questions that don't affect a design decision
+- **Dependency order** — file blocking issues before dependent issues; capture issue numbers and embed them in dependent issues' `## Dependencies` sections at creation time; never edit an issue body after creation just to add a reference number
+- **Labels required** — every filed issue must have `stage/research` and exactly one priority label (`P0`–`P3`); omitting either is an error. Do NOT add `triage` — seed research issues are pre-approved by the spec and must never go through triage scoring
+- **No `TodoWrite`** — do not use the `TodoWrite` tool; track state in your reasoning
 - **Maximum 2 versions planned at once** — never plan 3 versions ahead
 - **No implementation issues** — plan-milestones creates only the milestone and research issues;
   design-worker creates impl issues after research completes

@@ -81,11 +81,7 @@ by a doc. They do NOT exist to track:
 - Be assigned the **same milestone** as the parent issue
 - Represent a topic that warrants a standalone research document
 - Not duplicate an existing open or closed issue
-- Include `triage` in their label list so the orchestrator can find and score them quickly
-
-**All follow-ups are subject to the triage rubric** (see CLAUDE.md "Research Issue Triage").
-The orchestrator applies the rubric immediately after each merge — do not assume follow-ups
-will be dispatched. Issues scoring < 2/3 are closed with `wont-research`.
+- Be worth a standalone research document — only file issues that would genuinely block design
 
 ### Research Agent Instructions
 
@@ -163,17 +159,16 @@ Launch sub-agents in parallel using `Agent(isolation: "worktree")`.
 >    - Would require a standalone research document to answer
 >    - Tag each recommendation in the doc's "Follow-Up Research Recommendations" section:
 >      - `[BLOCKS_IMPL]` — needed before the current implementation milestone can be designed
->      - `[V2_RESEARCH]` — useful but doesn't block v1; belongs in a later research milestone
+>      - `[DEFERRED]` — useful but doesn't block v1; belongs in a later research milestone
 >      - `[WONT_RESEARCH]` — not worth a standalone doc; note inline, don't file an issue
->    - Only create GitHub issues for `[BLOCKS_IMPL]` and `[V2_RESEARCH]` items
+>    - Only create GitHub issues for `[BLOCKS_IMPL]` and `[DEFERRED]` items
 >    - To assign the milestone, inspect what milestones exist and their descriptions:
 >      `gh milestone list --repo <owner>/<repo>`
->      Pick the lowest-numbered *research* milestone beyond the current one for `[V2_RESEARCH]` items.
+>      Pick the lowest-numbered *research* milestone beyond the current one for `[DEFERRED]` items.
 >      Use the current research milestone for `[BLOCKS_IMPL]` items.
->    - Use: `gh issue create --repo <owner>/<repo> --title "<topic>" --label "stage/research,triage" --milestone "<resolved milestone name>" --body "..."`
+>    - Use: `gh issue create --repo <owner>/<repo> --title "<topic>" --label "stage/research,<P0|P1|P2|P3>" --milestone "<resolved milestone name>" --body "..."`
 >    - Body MUST include: `## Spawned From`, `## Research Areas`, `## Deliverable`, `## Dependencies`
 >    - DO NOT create issues for: implementation tasks, data collection scripts, narrow empirical measurements, things already covered in existing docs
->    - Add `triage` label to ALL follow-up issues — the orchestrator will score them; don't pre-filter, but be conservative
 > 8. Commit from your working directory:
 >    ```bash
 >    cd <Working Directory>
@@ -214,17 +209,7 @@ As **each agent completes** (do not wait for the entire batch):
    - If running this skill manually: wait for CI (`gh pr checks <PR> --watch`), then `gh pr merge <PR> --squash --delete-branch`
 3. **Pull**: `git pull origin $DEFAULT_BRANCH`
 4. **Verify follow-ups were created**: read the research doc's "Follow-Up Issues Spawned" section
-   - If the agent created follow-ups, apply the **triage rubric** to each one immediately:
-     ```bash
-     gh issue list --state open --label triage --limit 50
-     ```
-     For each `triage`-labelled follow-up, score it (3 questions, need ≥2 yes):
-     1. Changes a current-milestone impl decision?
-     2. Genuinely new, not covered by an existing doc or issue?
-     3. Correctness or security risk if skipped?
-     - **Score < 2**: `gh issue close <N> --reason "not planned" --comment "score X/3"` + add `wont-research`
-     - **Score ≥ 2**: `gh issue edit <N> --remove-label triage` (keep, leave in queue)
-   - If the agent created zero follow-ups, read the doc's "Follow-Up Recommendations" section yourself and decide if any warrant issues — if so, create them with `triage` label and score them
+   - If the agent created zero follow-ups, read the doc's "Follow-Up Recommendations" section yourself and decide if any warrant issues — if so, create them with `stage/research,<P0|P1|P2|P3>` labels
 5. **Comment on the closed parent issue**: `gh issue comment <N> --repo <owner>/<repo> --body "Research doc merged in PR #<PR>. Follow-up issues: <list or 'none'>"`
 6. **Re-survey**: check for newly unblocked issues in the active milestone
 7. **Dispatch next batch** (up to 5 agents total active)
@@ -250,7 +235,7 @@ When the pipeline drains for the active milestone:
 
 3. **Cross-cutting gap check**: Are there *blocking* topics not yet covered by any issue?
    - If yes, file them as new issues in the current milestone — do NOT auto-dispatch.
-   - Apply the triage rubric and the `[BLOCKS_IMPL]` / `[V2_RESEARCH]` tags before filing.
+   - Apply the `[BLOCKS_IMPL]` / `[DEFERRED]` tags before filing.
    - If no, leave it at that — a complete research milestone does not require every possible
      question to be answered.
 
@@ -275,5 +260,5 @@ When the pipeline drains for the active milestone:
 - **Agents create their own follow-ups** — orchestrator reviews quality, doesn't recreate from scratch
 - **PRs must have full descriptions** — title, summary, key findings, follow-ups spawned
 - **No infinite loops** — stop when the milestone queue is empty
-- **Triage every follow-up before dispatch** — apply rubric immediately after each merge; close failing issues with `wont-research`; remove `triage` label from passing issues
+- **Follow-ups are self-qualifying** — only file issues that pass the `[BLOCKS_IMPL]` filter; the agent is responsible for not filing low-value issues
 - Report progress: log each completion/merge/follow-up creation as it happens

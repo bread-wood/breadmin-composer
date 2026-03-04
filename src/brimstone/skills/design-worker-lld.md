@@ -1,5 +1,8 @@
 Write the Low-Level Design (LLD) document for a single module.
 
+**Do NOT use the Agent tool. Do NOT spawn sub-agents. Do NOT explore the repo broadly.**
+Read only the specific files listed in the steps below.
+
 ## When to Run
 
 Dispatched by design-worker Phase 2 in parallel with other LLD agents,
@@ -13,42 +16,53 @@ From the session prompt:
 - `Module` — the module name (e.g. `runner`, `cli`, `config`)
 - `Issue` — the `Design: LLD for <module>` GitHub issue number
 - `Branch` — the branch to commit to
+- `Working Directory` — absolute path to the isolated worktree (already checked out)
 
 ## Execution
 
-### Step 0 — Check Out Branch
+### Step 0 — Enter Your Working Directory
 
 ```bash
-DEFAULT_BRANCH=$(gh repo view --repo <owner>/<repo> --json defaultBranchRef --jq '.defaultBranchRef.name')
-git fetch origin
-git checkout <branch>
-git rebase origin/$DEFAULT_BRANCH
+cd <Working Directory from Session Parameters>
 ```
+
+The branch is already checked out. Do NOT run `git checkout` or `git rebase`.
 
 ### Step 1 — Read the HLD
 
 ```bash
-gh api repos/<owner>/<repo>/contents/docs/design/<milestone>/HLD.md --jq '.content' | base64 -d
+cat docs/design/<milestone>/HLD.md
 ```
 
-Read the full HLD. Pay attention to:
-- The `### Module: <name>` section for your specific module
+Read the full HLD. Focus on the `### Module: <module>` section for your specific module:
 - Interfaces this module exposes to other modules
 - Dependencies on other modules
 
-### Step 2 — Read Relevant Research Docs
+### Step 2 — Read Relevant Inputs
+
+Read only the files below. Do NOT explore other directories.
 
 ```bash
-# List all research docs for this milestone
-gh api repos/<owner>/<repo>/contents/docs/research/<milestone> --jq '.[].name'
-```
+# List research docs for this milestone
+ls docs/research/<milestone>/
 
-Read the research docs relevant to this module. The HLD's module section should
-indicate which research findings apply.
+# Read each research doc relevant to this module
+# (the HLD's module section will indicate which ones apply)
+cat docs/research/<milestone>/<relevant-doc>.md
+
+# Read the existing source file for this module (if it exists)
+cat <module>/*.py 2>/dev/null || true
+
+# Read the test file for this module (if it exists)
+cat tests/test_<module>.py 2>/dev/null || true
+
+# Read the previous-milestone LLD for this module (if it exists)
+ls docs/design/ && cat docs/design/*/lld/<module>.md 2>/dev/null || true
+```
 
 ### Step 3 — Write the LLD
 
-Create `docs/design/<milestone>/lld/<module>.md` in the local checkout.
+Create `docs/design/<milestone>/lld/<module>.md` in your working directory.
 
 The LLD must cover:
 
@@ -88,26 +102,16 @@ The LLD must cover:
 - Other modules this module imports from
 - External libraries used and why
 
-### Step 4 — Commit the LLD
+### Step 4 — Follow the Mandatory Completion Steps
 
-```bash
-mkdir -p docs/design/lld
-git add docs/design/<milestone>/lld/<module>.md
-git commit -m "docs: add LLD for <module> (Closes #<issue_number>)"
-git push
-```
+Follow the **Required Completion Steps** in your session prompt exactly:
+- Step A: Commit the LLD doc
+- Step B: `git push -u origin <branch>`
+- Step C: `gh pr create ...`
 
-### Step 5 — Create PR
+Execute all three immediately without pausing.
 
-```bash
-gh pr create \
-  --repo <owner>/<repo> \
-  --title "Design: LLD for <module>" \
-  --body "Closes #<issue_number>" \
-  --base $DEFAULT_BRANCH
-```
-
-### Step 6 — STOP
+### Step 5 — STOP
 
 Do not merge. The orchestrator monitors the PR and merges when CI passes.
 
@@ -118,3 +122,4 @@ Do not merge. The orchestrator monitors the PR and merges when CI passes.
 - **No implementation code**: this agent writes documentation only
 - **Concrete recommendations**: every design decision must have a rationale,
   not just a list of options
+- **No Agent tool**: do not spawn sub-agents or Explore agents under any circumstances
