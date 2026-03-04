@@ -1027,18 +1027,35 @@ def _parse_dependencies(body: str) -> list[int]:
 def _filter_unblocked(
     issues: list[dict[str, Any]],
     open_issue_numbers: set[int],
+    store: BeadStore | None = None,
 ) -> list[dict[str, Any]]:
     """Remove issues whose dependencies are still open.
+
+    Uses bead store when available (dependencies parsed once at claim time).
+    Falls back to parsing the issue body when no bead exists.
 
     Args:
         issues:             List of issue dicts (must include ``body`` and ``number``).
         open_issue_numbers: Set of all currently open issue numbers in the milestone.
+        store:              Active BeadStore, or None.
 
     Returns:
-        Subset of *issues* whose ``Depends on`` references are all closed/absent.
+        Subset of *issues* whose dependencies are all closed/absent.
     """
     unblocked = []
     for issue in issues:
+        issue_number = issue.get("number", 0)
+        if store is not None:
+            bead = store.read_work_bead(issue_number)
+            if bead is not None:
+                blocked = any(
+                    (dep_bead := store.read_work_bead(dep)) is None or dep_bead.state != "closed"
+                    for dep in bead.blocked_by
+                )
+                if not blocked:
+                    unblocked.append(issue)
+                continue
+        # Fallback: parse from issue body
         deps = _parse_dependencies(issue.get("body") or "")
         if all(dep not in open_issue_numbers for dep in deps):
             unblocked.append(issue)
@@ -1194,6 +1211,7 @@ def _claim_issue(
     """
     if store is not None and issue is not None:
         milestone_title = (issue.get("milestone") or {}).get("title", "")
+        body = issue.get("body") or ""
         bead = WorkBead(
             v=1,
             issue_number=issue_number,
@@ -1205,6 +1223,7 @@ def _claim_issue(
             state="claimed",
             branch=branch,
             retry_count=0,
+            blocked_by=_parse_dependencies(body),
             claimed_at=datetime.now(UTC).isoformat(),
         )
         store.write_work_bead(bead)
@@ -1338,6 +1357,7 @@ def _classify_blocking_issues(
     config: Config,
     checkpoint: Checkpoint,
     dry_run: bool = False,
+    store: BeadStore | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Classify remaining open research issues as blocking or non-blocking.
 
@@ -1367,8 +1387,13 @@ def _classify_blocking_issues(
     non_blocking: list[dict] = []
 
     for issue in open_issues:
-        body = issue.get("body") or ""
-        if "[DEFERRED]" in body:
+        issue_number = issue.get("number", 0)
+        deferred = False
+        if store is not None:
+            bead = store.read_work_bead(issue_number)
+            if bead is not None:
+                deferred = bead.deferred
+        if deferred:
             non_blocking.append(issue)
         else:
             blocking.append(issue)
@@ -1804,6 +1829,7 @@ def _run_research_worker(
             config=config,
             checkpoint=checkpoint,
             dry_run=dry_run,
+            store=store,
         )
         for issue in blocking[:1]:
             click.echo(
@@ -1833,12 +1859,13 @@ def _run_research_worker(
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=False,
+                store=store,
             )
             if not blocking:
                 return
             active_issue_numbers = {info[0]["number"] for info in active.values()}
             open_issue_numbers = {i.get("number", 0) for i in open_issues}
-            unblocked = _filter_unblocked(blocking, open_issue_numbers)
+            unblocked = _filter_unblocked(blocking, open_issue_numbers, store=store)
             ranked = _sort_issues(unblocked)
             for issue in ranked:
                 if len(active) >= pool_size:
@@ -1944,6 +1971,7 @@ def _run_research_worker(
                 config=config,
                 checkpoint=checkpoint,
                 dry_run=False,
+                store=store,
             )
             if not blocking:
                 _run_completion_gate(
@@ -3580,7 +3608,7 @@ def _run_impl_worker(
     if dry_run:
         open_issues = _list_open_issues_by_label(repo, milestone, IMPL_LABEL)
         open_issue_numbers = {i.get("number", 0) for i in open_issues}
-        unblocked = _filter_unblocked(open_issues, open_issue_numbers)
+        unblocked = _filter_unblocked(open_issues, open_issue_numbers, store=store)
         ranked = _sort_issues(unblocked)
         if not ranked:
             click.echo("[dry-run] No open impl issues — implementation complete.")
@@ -3603,7 +3631,7 @@ def _run_impl_worker(
             open_issues = _list_open_issues_by_label(repo, milestone, IMPL_LABEL)
             active_issue_numbers = {info[0]["number"] for info in active.values()}
             open_issue_numbers = {i.get("number", 0) for i in open_issues}
-            unblocked = _filter_unblocked(open_issues, open_issue_numbers)
+            unblocked = _filter_unblocked(open_issues, open_issue_numbers, store=store)
             ranked = _sort_issues(unblocked)
             for issue in ranked:
                 if len(active) >= pool_size:
@@ -3847,14 +3875,14 @@ def _run_design_worker(
     if not dry_run:
         open_research_issues = _list_open_issues_by_label(repo, milestone, RESEARCH_LABEL)
         blocking, _ = _classify_blocking_issues(
-            open_research_issues, repo, milestone, config, checkpoint
+            open_research_issues, repo, milestone, config, checkpoint, store=store
         )
         if blocking:
             nums = ", ".join(f"#{i['number']}" for i in blocking)
             click.echo(
                 f"Error: {len(blocking)} blocking research issue(s) still open for milestone "
                 f"'{milestone}' ({nums}). All blocking research must complete before design "
-                f"can begin. Non-blocking [DEFERRED] issues may remain open.",
+                f"can begin.",
                 err=True,
             )
             raise SystemExit(1)
@@ -4836,8 +4864,16 @@ def _run_plan(
         f"  NEVER put priority (e.g. [P1]) in the issue title.\n"
         f"  Every issue must carry both `stage/research` AND exactly one priority label.\n\n"
         f"{spec_read_instruction}\n"
-        f"Then create the milestone and file research issues"
-        f" following the skill instructions in your system prompt."
+        f"Then follow **all steps** in your system prompt skill to create the milestone and "
+        f"file a complete research queue.\n\n"
+        f"CRITICAL — Research queue requirements:\n"
+        f"  - You MUST work through EVERY decomposition dimension in the skill (architecture,\n"
+        f"    tooling, testing, error handling, data models, etc.) and write your analysis\n"
+        f"    for each dimension before filing any issues.\n"
+        f"  - The spec's 'Key Unknowns' section is a starting point only — do NOT stop there.\n"
+        f"  - File a minimum of 4 research issues. If your analysis yields fewer, you missed\n"
+        f"    genuine unknowns in project tooling, testing strategy, or error conventions.\n"
+        f"  - Aim for 4–8 issues covering the full implementation surface."
         f"{dry_run_instruction}"
     )
 
