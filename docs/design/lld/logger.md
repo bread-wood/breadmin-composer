@@ -1,7 +1,7 @@
 # LLD: Logger Module
 
 **Module:** `logger`
-**File:** `src/composer/logger.py`
+**File:** `src/brimstone/logger.py`
 **Issue:** #112
 **Status:** Draft
 **Date:** 2026-03-02
@@ -10,9 +10,9 @@
 
 ## 1. Module Overview
 
-The `logger` module provides three independent JSONL write streams for conductor and its sub-agents: a permanent cost ledger, per-session execution logs, and a conductor orchestrator log. It exports a small write API and one dataclass. All consumers call these functions directly; nothing in this module reads or queries logs — that responsibility belongs to `cli.py` (`composer cost`).
+The `logger` module provides four independent JSONL write streams for brimstone and its sub-agents: a permanent cost ledger, per-session agent transcripts, a conductor orchestrator log, and a health log. It exports a small write API and one dataclass. All consumers call these functions directly; nothing in this module reads or queries logs — that responsibility belongs to `cli.py` (`brimstone cost`).
 
-**File path:** `src/composer/logger.py`
+**File path:** `src/brimstone/logger.py`
 
 **Exports:**
 
@@ -22,21 +22,31 @@ The `logger` module provides three independent JSONL write streams for conductor
 | `log_cost` | function | `runner` |
 | `log_session_event` | function | `runner` |
 | `log_conductor_event` | function | `runner`, `cli` |
-| `read_cost_ledger` | function | `cli` (`composer cost`) |
+| `read_cost_ledger` | function | `cli` (`brimstone cost`) |
 
 ---
 
 ## 2. Log Directory Layout
 
 ```
-~/.composer/
+~/.brimstone/
   logs/
     cost.jsonl                        ← cost ledger (permanent, append-only)
-    sessions/
-      <session-id>.jsonl              ← per-session execution log (one per claude -p run)
+    health.jsonl                      ← health check outcomes (permanent, append-only)
+    transcripts/
+      <session-id>.jsonl              ← per-agent transcript (one per claude -p run)
     conductor/
       <run-id>.jsonl                  ← orchestrator decisions and stage transitions
 ```
+
+**Four log streams:**
+
+| Stream | File | Audience |
+|--------|------|----------|
+| Cost ledger | `logs/cost.jsonl` | Billing reconciliation; `brimstone cost` CLI |
+| Agent transcripts | `logs/transcripts/<session-id>.jsonl` | Debugging; audit trail per agent invocation |
+| Conductor log | `logs/conductor/<run-id>.jsonl` | Orchestrator decisions; stage transitions; MergeQueue events |
+| Health log | `logs/health.jsonl` | Preflight check outcomes; yeast-bot collaborator status |
 
 ### 2.1 Directory Creation
 
@@ -44,7 +54,7 @@ All directories are created on first write with `os.makedirs(path, exist_ok=True
 
 ### 2.2 Configuration Override
 
-The log root defaults to `~/.composer/logs`. The environment variable `CONDUCTOR_LOG_DIR` overrides the entire root path. All three subdirectory paths derive from the resolved root:
+The log root defaults to `~/.brimstone/logs`. The environment variable `BRIMSTONE_LOG_DIR` overrides the entire root path. All three subdirectory paths derive from the resolved root:
 
 ```
 log_dir / "cost.jsonl"          → cost ledger
@@ -150,9 +160,23 @@ def _estimate_cost_usd(usage: dict, model: str) -> float:
 
 If the model string is unrecognized and a multiplier cannot be determined, write `total_cost_usd: null` and log a warning to the conductor log.
 
-### 3.5 `composer cost` Aggregation
+**Prompt cache pricing tiers (as of March 2026):**
 
-`composer cost` calls `read_cost_ledger(log_dir)`, then groups entries by `repo`, then by `stage`, summing `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, and `total_cost_usd`. The full aggregation logic is specified in Section 7.
+| Token type | Sonnet 4.6 price per MTok | Notes |
+|------------|--------------------------|-------|
+| Input (regular) | $3.00 | Full billing rate |
+| Output | $15.00 | Full billing rate |
+| Cache write (`cache_creation_input_tokens`) | $3.75 | 125% of input (cache population overhead) |
+| Cache read (`cache_read_input_tokens`) | $0.30 | 10% of input (cache hit discount) |
+| Opus 4.6 multiplier | ~5x | Apply across all token types |
+
+Cache read tokens are the most cost-effective. Long-running agents that re-read the same
+CLAUDE.md and skill files on every turn benefit most from prompt caching. Cost estimates
+without cache breakdown will be systematically too high.
+
+### 3.5 `brimstone cost` Aggregation
+
+`brimstone cost` calls `read_cost_ledger(log_dir)`, then groups entries by `repo`, then by `stage`, summing `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, and `total_cost_usd`. The full aggregation logic is specified in Section 7.
 
 ---
 
@@ -446,11 +470,11 @@ A single-issue run (one JSON object per line):
 {"timestamp": "2026-03-02T14:32:01.200Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "dispatch", "event_type": "agent_dispatched", "payload": {"issue_number": 7, "session_id": "550e8400-e29b-41d4-a716-446655440000"}}
 {"timestamp": "2026-03-02T14:35:22.500Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "dispatch", "event_type": "agent_completed", "payload": {"issue_number": 7, "subtype": "success", "is_error": false, "cost_usd": 0.8341}}
 {"timestamp": "2026-03-02T14:35:35.100Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "dispatch", "event_type": "pr_created", "payload": {"issue_number": 7, "pr_number": 42}}
-{"timestamp": "2026-03-02T14:35:36.000Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "dispatch", "event_type": "checkpoint_write", "payload": {"path": "/home/user/.composer/logs/conductor/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl", "claimed_count": 1, "completed_count": 0}}
+{"timestamp": "2026-03-02T14:35:36.000Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "dispatch", "event_type": "checkpoint_write", "payload": {"path": "/home/user/.brimstone/logs/conductor/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl", "claimed_count": 1, "completed_count": 0}}
 {"timestamp": "2026-03-02T14:40:12.000Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "ci_check", "event_type": "ci_checked", "payload": {"pr_number": 42, "status": "pending"}}
 {"timestamp": "2026-03-02T14:47:30.000Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "ci_check", "event_type": "ci_checked", "payload": {"pr_number": 42, "status": "pass"}}
 {"timestamp": "2026-03-02T14:47:45.000Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "merge", "event_type": "pr_merged", "payload": {"pr_number": 42, "issue_number": 7}}
-{"timestamp": "2026-03-02T14:47:46.000Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "merge", "event_type": "checkpoint_write", "payload": {"path": "/home/user/.composer/logs/conductor/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl", "claimed_count": 1, "completed_count": 1}}
+{"timestamp": "2026-03-02T14:47:46.000Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "merge", "event_type": "checkpoint_write", "payload": {"path": "/home/user/.brimstone/logs/conductor/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl", "claimed_count": 1, "completed_count": 1}}
 {"timestamp": "2026-03-02T14:47:47.000Z", "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "phase": "complete", "event_type": "stage_complete", "payload": {"issues_completed": 1, "total_cost_usd": 0.8341}}
 ```
 
@@ -597,7 +621,7 @@ No locking. The orchestrator is single-writer for its own run file.
 
 ### 6.6 `read_cost_ledger(log_dir)`
 
-Reads all entries from `cost.jsonl` and returns them as a list of dicts. Used by `composer cost`.
+Reads all entries from `cost.jsonl` and returns them as a list of dicts. Used by `brimstone cost`.
 
 ```python
 def read_cost_ledger(log_dir: Path) -> list[dict]:
@@ -614,9 +638,9 @@ def read_cost_ledger(log_dir: Path) -> list[dict]:
 
 ---
 
-## 7. `composer cost` Aggregation
+## 7. `brimstone cost` Aggregation
 
-`composer cost` calls `read_cost_ledger(log_dir)`, then aggregates and prints a summary table.
+`brimstone cost` calls `read_cost_ledger(log_dir)`, then aggregates and prints a summary table.
 
 ### 7.1 Aggregation Logic
 
@@ -637,7 +661,7 @@ Entries with `total_cost_usd: null` contribute `0` to the cost sum. The table no
 ### 7.2 Output Format
 
 ```
-composer cost
+brimstone cost
 
 Repo: myorg/myrepo
 +------------------+----------+-----------------+---------------+-----------------+
@@ -660,7 +684,7 @@ Multiple repos are printed as separate tables, each with its own repo header. A 
 The CLI command in `cli.py`:
 
 ```python
-@composer.command("cost")
+@brimstone.command("cost")
 @click.option("--repo", default=None, help="Filter to a specific repo (owner/repo)")
 @click.option("--stage", default=None, help="Filter to a specific stage")
 def cost(repo: str | None, stage: str | None) -> None:
@@ -691,7 +715,7 @@ Filters are applied before aggregation if provided.
 | `runner.py` | `log_session_event` | For each parsed stream-json event and on `dispatch_start` |
 | `runner.py` | `log_conductor_event` | On `agent_dispatched`, `agent_completed`, `pr_created`, `ci_checked`, `pr_merged`, `backoff_enter`, `backoff_exit`, `checkpoint_write`, `human_escalate` |
 | `cli.py` (`impl_worker`, `research_worker`) | `log_conductor_event` | On `stage_start`, `issue_claimed`, `stage_complete` |
-| `cli.py` (`composer cost`) | `read_cost_ledger` | On `composer cost` invocation |
+| `cli.py` (`brimstone cost`) | `read_cost_ledger` | On `brimstone cost` invocation |
 
 ### 8.3 What This Module Does NOT Do
 
@@ -707,8 +731,8 @@ Filters are applied before aggregation if provided.
 ## 9. Cross-References
 
 - **`docs/research/05-logging-observability.md`**: Authoritative source for stream-json event schemas, cost field extraction, structlog configuration, and the `fcntl.flock` write pattern.
-- **`src/composer/config.py`**: Resolves `CONDUCTOR_LOG_DIR` env var and constructs `Config.log_dir`; callers pass `Config.log_dir` into this module's functions.
-- **`src/composer/runner.py`**: Primary caller of `log_cost` and `log_session_event`; owns the subprocess lifecycle and stream parsing.
-- **`src/composer/cli.py`**: Calls `log_conductor_event` for stage-level events; calls `read_cost_ledger` for `composer cost`.
+- **`src/brimstone/config.py`**: Resolves `CONDUCTOR_LOG_DIR` env var and constructs `Config.log_dir`; callers pass `Config.log_dir` into this module's functions.
+- **`src/brimstone/runner.py`**: Primary caller of `log_cost` and `log_session_event`; owns the subprocess lifecycle and stream parsing.
+- **`src/brimstone/cli.py`**: Calls `log_conductor_event` for stage-level events; calls `read_cost_ledger` for `brimstone cost`.
 - **`docs/research/08-usage-scheduling.md` §5.2**: `total_cost_usd` in cost ledger entries feeds the usage governor's `can_dispatch()` budget check.
 - **`docs/research/02-session-continuity.md` §8**: The `session_id` in per-session log filenames is the same ID used for `--resume` forensics.

@@ -66,8 +66,13 @@ class Config(BaseSettings):
     subscription_tier           : str    [env: CONDUCTOR_SUBSCRIPTION_TIER,          default: "pro", choices: pro|max|max20x]
 
     # --- Paths ---
-    log_dir           : Path  [env: CONDUCTOR_LOG_DIR,          default: ~/.composer/logs]
-    checkpoint_dir    : Path  [env: CONDUCTOR_CHECKPOINT_DIR,   default: ~/.composer/checkpoints]
+    log_dir           : Path  [env: BRIMSTONE_LOG_DIR,          default: ~/.brimstone/logs]
+    checkpoint_dir    : Path  [env: BRIMSTONE_CHECKPOINT_DIR,   default: ~/.brimstone/checkpoints]
+    beads_dir         : Path  [env: BRIMSTONE_BEADS_DIR,        default: ~/.brimstone/beads]
+
+    # --- State Repo (optional) ---
+    state_repo        : str | None  [env: BRIMSTONE_STATE_REPO,     default: None]
+    state_repo_dir    : Path | None [env: BRIMSTONE_STATE_REPO_DIR, default: None]
 
     # --- Derived (properties, not fields) ---
     @property sessions_dir   -> Path   (log_dir / "sessions")
@@ -87,8 +92,15 @@ class Config(BaseSettings):
 | `backoff_max_minutes` | `float` | `CONDUCTOR_BACKOFF_MAX_MINUTES` | `32.0` | No | `>= 1.0`; `Field(ge=1.0)` |
 | `agent_timeout_minutes` | `float` | `CONDUCTOR_AGENT_TIMEOUT_MINUTES` | `30.0` | No | `>= 1.0`; `Field(ge=1.0)` |
 | `subscription_tier` | `str` | `CONDUCTOR_SUBSCRIPTION_TIER` | `"pro"` | No | `Literal["pro", "max", "max20x"]` |
-| `log_dir` | `Path` | `CONDUCTOR_LOG_DIR` | `~/.composer/logs` | No | Path is created if missing (by caller; config does not mkdir) |
-| `checkpoint_dir` | `Path` | `CONDUCTOR_CHECKPOINT_DIR` | `~/.composer/checkpoints` | No | Same as above |
+| `log_dir` | `Path` | `BRIMSTONE_LOG_DIR` | `~/.brimstone/logs` | No | Path is created if missing (by caller; config does not mkdir) |
+| `checkpoint_dir` | `Path` | `BRIMSTONE_CHECKPOINT_DIR` | `~/.brimstone/` | No | Same as above |
+| `beads_dir` | `Path` | `BRIMSTONE_BEADS_DIR` | `~/.brimstone/beads` | No | Root directory for bead files; layout: `beads_dir/<owner>/<repo>/work/`, `prs/`, `merge-queue.json` |
+| `state_repo` | `str \| None` | `BRIMSTONE_STATE_REPO` | `None` | No | Optional git repo URL for pushing bead state after each flush. If set, `BeadStore.flush()` commits and pushes bead changes to this repo for cross-machine durability. |
+| `state_repo_dir` | `Path \| None` | `BRIMSTONE_STATE_REPO_DIR` | `None` | No | Local clone path for `state_repo`. Required if `state_repo` is set. Must be a pre-cloned local directory. |
+
+### 2.3 `build_subprocess_env` Seeds `BRIMSTONE_*` Vars
+
+`build_subprocess_env` seeds policy-limit env vars into each subprocess dict — including `BRIMSTONE_MAX_RETRIES`, `BRIMSTONE_AGENT_TIMEOUT_MINUTES`, and `BRIMSTONE_BACKOFF_MAX_MINUTES` — so that sub-agents and recovery agents inherit the same limits as the orchestrator without reading from the parent's `os.environ` directly. The `BRIMSTONE_GH_TOKEN` (yeast-bot token) is also injected so worker agents can authenticate for PR creation and branch pushes.
 
 ### 2.3 Required Fields: Bypass of `CONDUCTOR_` Prefix
 
@@ -209,6 +221,11 @@ When `claude -p` starts in a given `cwd`, it discovers CLAUDE.md files by walkin
 ---
 
 ## 4. Subprocess Env Dict Construction
+
+> **Note:** `build_subprocess_env` seeds policy-limits env vars into each subprocess dict —
+> including `BRIMSTONE_MAX_RETRIES`, `BRIMSTONE_AGENT_TIMEOUT_MINUTES`, and
+> `BRIMSTONE_BACKOFF_MAX_MINUTES` — so that sub-agents and recovery agents inherit the same
+> limits as the orchestrator without reading from the parent's `os.environ` directly.
 
 ### 4.1 Function Signature
 
