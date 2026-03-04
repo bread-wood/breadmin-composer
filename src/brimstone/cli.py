@@ -2032,12 +2032,27 @@ def _run_completion_gate(
                 "## Deliverable\n"
                 f"`docs/design/{milestone}/HLD.md`\n\n"
                 "## Instructions\n"
-                f"Read all merged research docs in `docs/research/{milestone}/`. Write the HLD. "
-                "For each module identified, file a `Design: LLD for <module>` issue "
-                "with label `stage/design` and this milestone. Check for duplicates first.\n\n"
+                f"Read all merged research docs in `docs/research/{milestone}/`. Write the HLD.\n\n"
+                "For each module identified, file a `Design: LLD for <module>` issue with "
+                "label `stage/design` and this milestone. Check for duplicates first.\n\n"
+                "**Each LLD issue body must include a module-specific description drawn "
+                "directly from the HLD.** Use this exact template for every LLD issue body:\n\n"
+                "```\n"
+                "## Module description\n"
+                "<1–2 sentence summary of what this module does and its role in the system, "
+                "taken from the HLD.>\n\n"
+                "## Key responsibilities\n"
+                "<Bullet list of the module's main responsibilities as described in the HLD.>\n\n"
+                "## Deliverable\n"
+                f"`docs/design/{milestone}/lld/<module>.md`\n\n"
+                "## Acceptance criteria\n"
+                "The LLD must cover: public interface, data structures, key algorithms, "
+                "error handling, and test strategy for this module.\n"
+                "```\n\n"
                 "## Acceptance Criteria\n"
                 f"- `docs/design/{milestone}/HLD.md` committed and PR created\n"
-                "- One `Design: LLD for <module>` issue filed per module"
+                "- One `Design: LLD for <module>` issue filed per module, each with a "
+                "module-specific description from the HLD"
             ),
         )
 
@@ -2828,6 +2843,7 @@ def _dispatch_design_agent(
     today = date.today().isoformat()
 
     if module_name:
+        issue_body = issue.get("body") or ""
         prompt = (
             f"## Session Parameters\n"
             f"- Repository: {repo}\n"
@@ -2838,7 +2854,9 @@ def _dispatch_design_agent(
             f"- Session Date: {today}\n\n"
             f"You are the design-worker LLD agent for module `{module_name}` in `{repo}`.\n"
             f"Write the Low-Level Design document for this module following the skill "
-            f"instructions in your system prompt."
+            f"instructions in your system prompt.\n\n"
+            f"## Issue description\n"
+            f"{issue_body}\n"
         )
         prefix = f"[design-lld/{module_name}] "
     else:
