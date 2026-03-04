@@ -5861,6 +5861,27 @@ def init(
         else:
             click.echo(f"Warning: could not create {repo_ref}: {stderr}", err=True)
 
+    # ── 1a. Rename default branch to mainline (idempotent) ──────────────────
+    default_branch = _config.default_branch  # "mainline"
+    rename_result = subprocess.run(
+        [
+            "gh", "api",
+            f"repos/{repo_ref}/branches/main/rename",
+            "--method", "POST",
+            "--field", f"new_name={default_branch}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if rename_result.returncode == 0:
+        click.echo(f"Renamed default branch to {default_branch}")
+    else:
+        stderr = rename_result.stderr.strip()
+        if "Branch not found" in stderr or "already exists" in stderr:
+            pass  # already on mainline or rename not needed
+        else:
+            click.echo(f"Warning: could not rename default branch: {stderr}", err=True)
+
     # ── 2. Add yeast-bot as collaborator ────────────────────────────────────
     _add_brimstone_bot_collaborator(repo_ref)
 
