@@ -22,6 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import click
 import pytest
 
 from brimstone.cli import _run_design_worker, _run_plan_issues
@@ -561,6 +562,7 @@ class TestDesignWorkerPhase2:
             patch(_DESIGN_PATCHES["find_pr"], return_value=5),
             patch(_DESIGN_PATCHES["monitor_pr"], return_value=True),
             patch(_DESIGN_PATCHES["remove_wt"]),
+            patch(_DESIGN_PATCHES["unclaim"]),
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
             patch(_DESIGN_PATCHES["slugify"], return_value="slug"),
@@ -686,6 +688,8 @@ class TestRunPlanIssues:
             patch("brimstone.cli.logger.log_conductor_event"),
             patch("brimstone.cli.session.save"),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
+            patch("brimstone.cli._ensure_worktree_repo", return_value=("/fake/repo", "/fake/tmp")),
+            patch("brimstone.cli.shutil.rmtree"),
         ):
             _run_plan_issues(
                 repo="owner/repo",
@@ -722,6 +726,8 @@ class TestRunPlanIssues:
             patch("brimstone.cli.logger.log_conductor_event"),
             patch("brimstone.cli.session.save"),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
+            patch("brimstone.cli._ensure_worktree_repo", return_value=("/fake/repo", "/fake/tmp")),
+            patch("brimstone.cli.shutil.rmtree"),
         ):
             _run_plan_issues(
                 repo="owner/repo",
@@ -761,7 +767,7 @@ class TestRunPlanIssues:
         assert "v1" in out
         assert "owner/repo" in out
 
-    def test_error_result_prints_to_stderr(self, tmp_path: Path, capsys) -> None:
+    def test_error_result_raises_click_exception(self, tmp_path: Path) -> None:
         config = make_config(tmp_path)
         checkpoint = make_checkpoint(stage="plan-issues")
         run_result = make_run_result(
@@ -773,6 +779,9 @@ class TestRunPlanIssues:
             patch("brimstone.cli.logger.log_conductor_event"),
             patch("brimstone.cli.session.save"),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
+            patch("brimstone.cli._ensure_worktree_repo", return_value=("/fake/repo", "/fake/tmp")),
+            patch("brimstone.cli.shutil.rmtree"),
+            pytest.raises(click.ClickException) as exc_info,
         ):
             _run_plan_issues(
                 repo="owner/repo",
@@ -782,8 +791,7 @@ class TestRunPlanIssues:
                 dry_run=False,
             )
 
-        captured = capsys.readouterr()
-        assert "error" in captured.err.lower()
+        assert "error_max_turns" in exc_info.value.format_message()
 
     def test_logs_start_and_complete_events(self, tmp_path: Path) -> None:
         config = make_config(tmp_path)
@@ -799,6 +807,8 @@ class TestRunPlanIssues:
             patch("brimstone.cli.logger.log_conductor_event", side_effect=record_event),
             patch("brimstone.cli.session.save"),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
+            patch("brimstone.cli._ensure_worktree_repo", return_value=("/fake/repo", "/fake/tmp")),
+            patch("brimstone.cli.shutil.rmtree"),
         ):
             _run_plan_issues(
                 repo="owner/repo",

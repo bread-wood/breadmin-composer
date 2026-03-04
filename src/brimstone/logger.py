@@ -68,16 +68,27 @@ BRIMSTONE_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# Pricing constants for subscription-mode cost estimation (March 2026, claude-sonnet-4-6)
-_SONNET_PRICES: dict[str, float] = {
-    "input_per_mtok": 3.00,
-    "output_per_mtok": 15.00,
-    "cache_write_per_mtok": 3.75,  # 125% of input price
-    "cache_read_per_mtok": 0.30,  # 10% of input price
+# Per-model-family pricing (March 2026, USD per million tokens).
+_MODEL_PRICES: dict[str, dict[str, float]] = {
+    "haiku": {
+        "input_per_mtok": 0.80,
+        "output_per_mtok": 4.00,
+        "cache_write_per_mtok": 1.00,
+        "cache_read_per_mtok": 0.08,
+    },
+    "sonnet": {
+        "input_per_mtok": 3.00,
+        "output_per_mtok": 15.00,
+        "cache_write_per_mtok": 3.75,
+        "cache_read_per_mtok": 0.30,
+    },
+    "opus": {
+        "input_per_mtok": 15.00,
+        "output_per_mtok": 75.00,
+        "cache_write_per_mtok": 18.75,
+        "cache_read_per_mtok": 1.50,
+    },
 }
-
-#: claude-opus-4-6 is approximately 5x the cost of claude-sonnet-4-6.
-_OPUS_MULTIPLIER: float = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +120,7 @@ class LogContext:
     repo: str
     stage: str
     issue_number: int | None = None
+    milestone: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +136,8 @@ def _now_iso() -> str:
 def _estimate_cost_usd(usage: dict, model: str) -> float | None:
     """Estimate total cost in USD from token counts.
 
-    Uses Sonnet 4.6 pricing as the baseline. Applies a 5x multiplier for
-    Opus models. Returns ``None`` when the model family is unrecognised.
+    Looks up per-model-family pricing from ``_MODEL_PRICES``.
+    Returns ``None`` when the model family is unrecognised.
 
     Args:
         usage: Dict with token count keys (input_tokens, output_tokens,
@@ -134,25 +146,23 @@ def _estimate_cost_usd(usage: dict, model: str) -> float | None:
 
     Returns:
         Estimated cost in USD, rounded to 6 decimal places, or ``None`` if
-        the model multiplier cannot be determined.
+        the model family cannot be determined.
     """
     model_lower = model.lower()
     if "opus" in model_lower:
-        mult = _OPUS_MULTIPLIER
-    elif "sonnet" in model_lower or "haiku" in model_lower:
-        mult = 1.0
+        p = _MODEL_PRICES["opus"]
+    elif "sonnet" in model_lower:
+        p = _MODEL_PRICES["sonnet"]
+    elif "haiku" in model_lower:
+        p = _MODEL_PRICES["haiku"]
     else:
         return None
 
-    p = _SONNET_PRICES
     return round(
-        (
-            usage.get("input_tokens", 0) / 1_000_000 * p["input_per_mtok"]
-            + usage.get("output_tokens", 0) / 1_000_000 * p["output_per_mtok"]
-            + usage.get("cache_creation_input_tokens", 0) / 1_000_000 * p["cache_write_per_mtok"]
-            + usage.get("cache_read_input_tokens", 0) / 1_000_000 * p["cache_read_per_mtok"]
-        )
-        * mult,
+        usage.get("input_tokens", 0) / 1_000_000 * p["input_per_mtok"]
+        + usage.get("output_tokens", 0) / 1_000_000 * p["output_per_mtok"]
+        + usage.get("cache_creation_input_tokens", 0) / 1_000_000 * p["cache_write_per_mtok"]
+        + usage.get("cache_read_input_tokens", 0) / 1_000_000 * p["cache_read_per_mtok"],
         6,
     )
 
@@ -256,6 +266,7 @@ def log_cost(
         "session_id": context.session_id,
         "run_id": context.run_id,
         "repo": context.repo,
+        "milestone": context.milestone,
         "stage": context.stage,
         "issue_number": context.issue_number,
         "model": model,
