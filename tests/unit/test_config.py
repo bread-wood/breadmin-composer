@@ -11,7 +11,6 @@ import pytest
 from brimstone.config import (
     Config,
     ConfigurationError,
-    OrchestratorNestingError,
     build_subprocess_env,
     load_config,
 )
@@ -194,33 +193,11 @@ def test_invalid_max_budget_type_raises_configuration_error(
 # ---------------------------------------------------------------------------
 
 
-def test_claudecode_env_raises_nested_orchestrator_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """load_config() raises OrchestratorNestingError when CLAUDECODE=1."""
+def test_claudecode_env_does_not_prevent_load_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLAUDECODE=1 must not prevent load_config() from succeeding."""
     for key, val in make_env().items():
         monkeypatch.setenv(key, val)
     monkeypatch.setenv("CLAUDECODE", "1")
-
-    with pytest.raises(OrchestratorNestingError):
-        load_config()
-
-
-def test_claudecode_env_not_1_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CLAUDECODE=0 does not trigger the nesting guard."""
-    monkeypatch.setenv("CLAUDECODE", "0")
-    for key, val in make_env().items():
-        monkeypatch.setenv(key, val)
-
-    config = load_config()
-    assert isinstance(config, Config)
-
-
-def test_claudecode_absent_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Absent CLAUDECODE env var does not trigger the nesting guard."""
-    monkeypatch.delenv("CLAUDECODE", raising=False)
-    for key, val in make_env().items():
-        monkeypatch.setenv(key, val)
 
     config = load_config()
     assert isinstance(config, Config)

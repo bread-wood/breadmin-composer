@@ -14,7 +14,7 @@ from brimstone.cli import (
     inject_skill,
     startup_sequence,
 )
-from brimstone.config import Config, OrchestratorNestingError
+from brimstone.config import Config
 from brimstone.health import FatalHealthCheckError
 from brimstone.session import Checkpoint
 
@@ -307,7 +307,6 @@ class TestStartupSequence:
         checkpoint_path = tmp_path / "current.json"
 
         with (
-            patch.dict("os.environ", {"CLAUDECODE": ""}, clear=False),
             patch("brimstone.cli.health.check_all", return_value=fatal_report),
             patch("brimstone.cli.health.format_report", return_value="FATAL"),
             patch("brimstone.cli.click.echo"),
@@ -340,7 +339,6 @@ class TestStartupSequence:
         checkpoint_path = tmp_path / "current.json"
 
         with (
-            patch.dict("os.environ", {"CLAUDECODE": ""}, clear=False),
             patch("brimstone.cli.health.check_all", return_value=warn_report),
             patch("brimstone.cli.health.format_report", return_value="WARN"),
             patch("brimstone.cli.health.acquire_orchestrator_lock"),
@@ -356,22 +354,6 @@ class TestStartupSequence:
 
         # Should have echoed the warning report
         mock_echo.assert_called()
-
-    def test_raises_orchestrator_nesting_error_when_claudecode_set(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """startup_sequence raises OrchestratorNestingError when CLAUDECODE=1."""
-        monkeypatch.setenv("CLAUDECODE", "1")
-        config = make_config()
-        checkpoint_path = tmp_path / "current.json"
-
-        with pytest.raises(OrchestratorNestingError):
-            startup_sequence(
-                config=config,
-                checkpoint_path=checkpoint_path,
-                milestone="MVP",
-                stage="research",
-            )
 
     def test_raises_value_error_on_run_id_mismatch(self, tmp_path: Path) -> None:
         """startup_sequence raises ValueError when resume_run_id doesn't match checkpoint."""
@@ -391,7 +373,6 @@ class TestStartupSequence:
         config = make_config()
 
         with (
-            patch.dict("os.environ", {"CLAUDECODE": ""}, clear=False),
             patch("brimstone.cli.health.check_all", return_value=pass_report),
             patch("brimstone.cli.health.acquire_orchestrator_lock"),
             patch("brimstone.cli.logger.log_conductor_event"),
@@ -420,7 +401,6 @@ class TestStartupSequence:
         assert not checkpoint_path.exists()
 
         with (
-            patch.dict("os.environ", {"CLAUDECODE": ""}, clear=False),
             patch("brimstone.cli.health.check_all", return_value=pass_report),
             patch("brimstone.cli.health.acquire_orchestrator_lock"),
             patch("brimstone.cli.logger.log_conductor_event"),
@@ -453,7 +433,6 @@ class TestStartupSequence:
         config = make_config()
 
         with (
-            patch.dict("os.environ", {"CLAUDECODE": ""}, clear=False),
             patch("brimstone.cli.health.check_all", return_value=pass_report),
             patch("brimstone.cli.health.acquire_orchestrator_lock"),
             patch("brimstone.cli.logger.log_conductor_event"),

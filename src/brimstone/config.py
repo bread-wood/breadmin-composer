@@ -193,7 +193,6 @@ class Config(BaseSettings):
 def load_config(**cli_overrides: Any) -> Config:
     """Validate configuration and return a Config instance.
 
-    Raises OrchestratorNestingError if CLAUDECODE=1 is set in the environment.
     Raises ConfigurationError if required environment variables are missing or
     if any field value fails validation.
 
@@ -204,17 +203,6 @@ def load_config(**cli_overrides: Any) -> Config:
     Returns:
         A validated Config instance.
     """
-    if os.environ.get("CLAUDECODE") == "1":
-        raise OrchestratorNestingError(
-            "Cannot nest orchestrator invocations.\n\n"
-            "CLAUDECODE=1 is set in the current environment, which means this process is\n"
-            "already running inside a Claude Code session.\n\n"
-            "To run the conductor, open a plain terminal (not a Claude Code session) and\n"
-            "invoke it from there. If you need to test the conductor from within Claude\n"
-            "Code, use a sub-shell that unsets CLAUDECODE:\n\n"
-            "    (unset CLAUDECODE && brimstone impl-worker)"
-        )
-
     try:
         return Config(**cli_overrides)
     except Exception as exc:

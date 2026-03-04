@@ -30,7 +30,6 @@ import click
 from brimstone import health, logger, runner, session
 from brimstone.config import (
     Config,
-    OrchestratorNestingError,
     build_subprocess_env,
     load_config,
 )
@@ -65,13 +64,12 @@ def startup_sequence(
     """Shared startup sequence run by every worker before entering its main loop.
 
     Steps:
-      1. CLAUDECODE nesting guard
-      2. Health checks (abort on fatal, print warn and continue)
-      3. Load or create checkpoint
-      4. Validate resume_run_id if supplied
-      5. Acquire orchestrator lock
-      6. Log stage_start event
-      7. Return (config, checkpoint)
+      1. Health checks (abort on fatal, print warn and continue)
+      2. Load or create checkpoint
+      3. Validate resume_run_id if supplied
+      4. Acquire orchestrator lock
+      5. Log stage_start event
+      6. Return (config, checkpoint)
 
     Args:
         config:           Validated Config instance.
@@ -86,22 +84,13 @@ def startup_sequence(
         A (Config, Checkpoint) tuple ready for the worker loop.
 
     Raises:
-        OrchestratorNestingError: If CLAUDECODE=1 is set in the environment.
-        FatalHealthCheckError:    If any health check is fatal.
+        FatalHealthCheckError: If any health check is fatal.
         ValueError:               If resume_run_id is provided and does not
                                   match the checkpoint's run_id.
     """
-    # Step 1: Nesting guard (also checked by load_config, but be explicit here)
-    if os.environ.get("CLAUDECODE") == "1":
-        raise OrchestratorNestingError(
-            "Cannot nest orchestrator invocations.\n\n"
-            "CLAUDECODE=1 is set in the current environment, which means this process is\n"
-            "already running inside a Claude Code session.\n\n"
-            "To run the conductor, open a plain terminal (not a Claude Code session) and\n"
-            "invoke it from there."
-        )
-
-    # Step 2: Health checks
+    # Step 1: Health checks (formerly Step 2 — nesting guard removed; brimstone
+    # may safely run inside Claude Code because build_subprocess_env constructs
+    # sub-agent envs from scratch and never forwards CLAUDECODE).
     report = health.check_all(config, skip_checks=skip_checks)
     if report.fatal:
         click.echo(health.format_report(report))
@@ -4714,10 +4703,6 @@ def run(
 
       brimstone run --all --milestone "v0.1.0" --dry-run
     """
-    # This is the top-level orchestrator; stage calls are direct Python
-    # invocations, not nested Claude Code sessions.
-    os.environ.pop("CLAUDECODE", None)
-
     # -----------------------------------------------------------------------
     # Determine ordered stages to run
     # -----------------------------------------------------------------------

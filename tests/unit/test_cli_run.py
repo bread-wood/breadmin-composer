@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -454,35 +453,25 @@ class TestRunDryRun:
         assert not workers_called, "No workers should run in --dry-run mode"
         assert "dry-run" in result.output.lower()
 
-    def test_dry_run_clears_claudecode_env(self, tmp_path: Path) -> None:
-        """CLAUDECODE must be cleared even in dry-run mode."""
-        snapshots: list[str | None] = []
-
+    def test_dry_run_succeeds_when_running_inside_claude_code(self, tmp_path: Path) -> None:
+        """brimstone run must succeed even when CLAUDECODE=1 is set (running inside Claude Code)."""
         with patch.dict("os.environ", {**MINIMAL_ENV, "CLAUDECODE": "1"}, clear=False):
             with patch("brimstone.cli._resolve_repo", return_value=(_REPO, str(tmp_path))):
-                original_count = patch("brimstone.cli._count_all_open_research_issues")
-                with original_count:
+                runner = CliRunner()
+                result = runner.invoke(
+                    composer,
+                    [
+                        "run",
+                        "--research",
+                        "--repo",
+                        _REPO,
+                        "--milestone",
+                        _MILESTONE,
+                        "--dry-run",
+                    ],
+                )
 
-                    def capture(*a: object, **kw: object) -> None:
-                        snapshots.append(os.environ.get("CLAUDECODE"))
-
-                    runner = CliRunner()
-                    result = runner.invoke(
-                        composer,
-                        [
-                            "run",
-                            "--research",
-                            "--repo",
-                            _REPO,
-                            "--milestone",
-                            _MILESTONE,
-                            "--dry-run",
-                        ],
-                    )
-
-        # The command must not fail and CLAUDECODE must have been cleared at invocation time
         assert result.exit_code == 0, result.output
-        assert os.environ.get("CLAUDECODE") == "1"  # restored after invoke
 
 
 # ---------------------------------------------------------------------------
