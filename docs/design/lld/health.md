@@ -1,7 +1,7 @@
 # LLD: Health Module
 
 **Module:** `health`
-**File:** `src/composer/health.py`
+**File:** `src/brimstone/health.py`
 **Issue:** #113
 **Status:** Draft
 **Date:** 2026-03-02
@@ -10,9 +10,9 @@
 
 ## 1. Module Overview
 
-The `health` module runs preflight checks before any worker or CLI command executes. It verifies that the environment is correctly configured, that no orphaned sessions are blocking the queue, and that the single-orchestrator invariant holds. Workers call `check_all()` on startup and abort if any fatal check fails. The `composer health` CLI command surfaces the same report to the operator.
+The `health` module runs preflight checks before any worker or CLI command executes. It verifies that the environment is correctly configured, that no orphaned sessions are blocking the queue, and that the single-orchestrator invariant holds. Workers call `check_all()` on startup and abort if any fatal check fails. The `brimstone health` CLI command surfaces the same report to the operator.
 
-**File path:** `src/composer/health.py`
+**File path:** `src/brimstone/health.py`
 
 **Exports:**
 
@@ -112,7 +112,7 @@ Checks run in this exact order. Each subsection specifies: detection method, pas
 | **Detection** | `subprocess.run(["git", "rev-parse", "--git-dir"], capture_output=True)` in the current working directory |
 | **Pass** | Exit code 0 — working directory is inside a git repo |
 | **Fail** | Exit code non-zero — not a git repo |
-| **Remediation** | `"Change to a git repository before running composer."` |
+| **Remediation** | `"Change to a git repository before running brimstone."` |
 
 This is check 1 because all subsequent checks that use `git` commands depend on it. A fail here triggers short-circuit.
 
@@ -148,9 +148,26 @@ A fail here triggers short-circuit. Checks 6, 7, and 8 all require `gh`.
 | **Detection** | `os.environ.get("ANTHROPIC_API_KEY", "")` — check that the variable exists and is non-empty |
 | **Pass** | Variable is set and non-empty |
 | **Fail** | Variable is absent or empty string |
-| **Remediation** | `"Set the ANTHROPIC_API_KEY environment variable before running composer."` |
+| **Remediation** | `"Set the ANTHROPIC_API_KEY environment variable before running brimstone."` |
 
 This check does not validate the key format or make an API call. Presence is sufficient for the preflight gate. A fail here triggers short-circuit.
+
+### Check 4b: yeast-bot collaborator check
+
+| Field | Value |
+|-------|-------|
+| **Name** | `yeast-bot collaborator` |
+| **Detection** | `gh api repos/<owner>/<repo>/collaborators/yeast-bot --silent`; check exit code |
+| **Pass** | Exit code 0 — yeast-bot is a collaborator on the repo |
+| **Warn** | Exit code non-zero — yeast-bot is not a collaborator |
+| **Remediation** | `"Add yeast-bot as a collaborator: gh api -X PUT repos/<owner>/<repo>/collaborators/yeast-bot -f permission=push"` |
+
+yeast-bot is the GitHub bot account used by brimstone workers to create PRs and push branches.
+Workers use yeast-bot's credentials via `GH_TOKEN`. If yeast-bot is not a collaborator, agents
+will fail when attempting to push branches or create PRs.
+
+This check is a warn (not fail) because the orchestrator can still operate in health check mode
+without yeast-bot access. Run `brimstone init OWNER/REPO` to add yeast-bot automatically.
 
 ### Check 5: No active worktrees
 
@@ -355,19 +372,20 @@ The module stores the `Config` reference at module level (`_config: Config | Non
 
 ---
 
-## 7. `composer health` Output Format
+## 7. `brimstone health` Output Format
 
 ### 7.1 Human-Readable Table (default)
 
 ```
-breadmin-composer health check
+brimstone health check
 ─────────────────────────────────────────────
 ✓ Git repo present
 ⚠ Default branch matches config
   Mismatch: config=main, repo=master
-  Fix: Set CONDUCTOR_DEFAULT_BRANCH=master or update config.
+  Fix: Set BRIMSTONE_DEFAULT_BRANCH=master or update config.
 ✓ gh CLI authenticated
 ✓ ANTHROPIC_API_KEY present
+✓ yeast-bot collaborator
 ⚠ No active worktrees
   2 worktrees found under .claude/worktrees/:
     .claude/worktrees/10-feat-config (3 days old)
@@ -405,7 +423,7 @@ Overall: WARN — 2 warning(s), 0 error(s)
 ### 7.2 JSON Output (`--json` flag)
 
 ```
-composer health --json
+brimstone health --json
 ```
 
 Outputs the `HealthReport` serialised to JSON. The schema:
@@ -451,9 +469,9 @@ Every worker entry point (`impl-worker`, `research-worker`, `design-worker`) cal
 ### 8.1 Startup Sequence
 
 ```python
-from composer.health import check_all, acquire_orchestrator_lock, FatalHealthCheckError
-from composer.config import Config
-from composer.session import Checkpoint
+from brimstone.health import check_all, acquire_orchestrator_lock, FatalHealthCheckError
+from brimstone.config import Config
+from brimstone.session import Checkpoint
 
 
 def run_worker(config: Config, checkpoint: Checkpoint | None) -> None:
@@ -489,7 +507,7 @@ Workers catch `FatalHealthCheckError` at the top-level entry point and exit with
 
 When `report.overall == "warn"` and `report.fatal == False`:
 
-1. Print the full health report table to stdout (same format as `composer health`).
+1. Print the full health report table to stdout (same format as `brimstone health`).
 2. Log each warn check to the conductor log with `event_type="health_warn"` and the check's `name`, `message`, and `remediation` in the payload.
 3. Continue execution — do not raise, do not pause.
 
@@ -522,7 +540,7 @@ When `report.overall == "pass"`:
 |----------|-------------|------|
 | `runner.py` (all workers) | `check_all`, `acquire_orchestrator_lock` | First action on worker startup, before any pipeline work |
 | `runner.py` (all workers) | `release_orchestrator_lock` | Via `atexit` and SIGTERM handler registered by `acquire_orchestrator_lock` |
-| `cli.py` (`composer health`) | `check_all` | On `composer health` invocation; outputs result and sets exit code |
+| `cli.py` (`brimstone health`) | `check_all` | On `brimstone health` invocation; outputs result and sets exit code |
 | `runner.py` | `FatalHealthCheckError` | Caught at top-level entry point; triggers `sys.exit(1)` |
 
 ### 9.3 What This Module Does NOT Do
@@ -541,7 +559,7 @@ When `report.overall == "pass"`:
 - **`docs/research/14-hang-detection.md` §7.3**: Defines the orphaned worktree detection pattern (`git worktree list` + cross-referencing running PIDs) that check 5 implements. The lock file PID check in check 9 extends this pattern to the orchestrator process itself.
 - **`docs/research/08-usage-scheduling.md` §5.4**: Defines the rate-limit backoff state stored in the checkpoint (`rate_limit_backoff_until`), which check 8 reads. The governor's post-429 requeue logic is what sets this field.
 - **`docs/research/19-pretooluse-reliability.md` §6**: The revised security architecture requires a smoke test before relying on hooks. An optional check 12 (hook smoke test) may be added in a future issue; it is out of scope for the current milestone.
-- **`src/composer/config.py`**: `Config.data_dir` is the root from which the lock file path (`data_dir / ".orchestrator.lock"`), checkpoint directory (`data_dir`), and log directory (`data_dir / "conductor"`) are derived.
-- **`src/composer/runner.py`**: Primary caller of `check_all()` and `acquire_orchestrator_lock()`. Owns the worker lifecycle and is responsible for catching `FatalHealthCheckError`.
-- **`src/composer/cli.py`**: Calls `check_all()` for the `composer health` command; formats and prints the `HealthReport`; sets process exit code.
+- **`src/brimstone/config.py`**: `Config.data_dir` is the root from which the lock file path (`data_dir / ".orchestrator.lock"`), checkpoint directory (`data_dir`), and log directory (`data_dir / "conductor"`) are derived.
+- **`src/brimstone/runner.py`**: Primary caller of `check_all()` and `acquire_orchestrator_lock()`. Owns the worker lifecycle and is responsible for catching `FatalHealthCheckError`.
+- **`src/brimstone/cli.py`**: Calls `check_all()` for the `brimstone health` command; formats and prints the `HealthReport`; sets process exit code.
 - **`docs/design/lld/logger.md` §5**: The `health_warn` and `health_pass` conductor log events (Section 8.3–8.4) are written using `log_conductor_event`. Their `payload` schemas should be added to the conductor log event type table in that document.

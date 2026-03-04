@@ -1,10 +1,26 @@
 # brimstone
 
-Headless Claude Code orchestrator for automated GitHub issue workstreams.
+brimstone — autonomous GitHub issue workstream orchestrator
 
-Runs a multi-stage pipeline (plan → research → design → scoping → implementation)
-against a target GitHub repo by invoking `claude -p` headlessly. Each stage dispatches
-sub-agents in parallel, monitors their output, and merges results back to the default branch.
+## How It Works
+
+brimstone runs a four-stage pipeline (scope → research → design → impl) against a target
+GitHub repo by invoking Claude Code sub-agents in isolated git worktrees. Each stage reads
+the previous stage's output from GitHub issues and docs, then produces the next stage's input.
+Bead files (`~/.brimstone/beads/`) provide durable state so that the orchestrator survives
+restarts and rate-limit backoffs. A Watchdog loop detects zombie agents and dispatches recovery
+sub-agents automatically. A MergeQueue ensures sequential squash merges to keep the commit
+history linear. Sub-agents own their own CI and review feedback — the orchestrator only merges
+after CI passes.
+
+## Prerequisites
+
+- `claude` — Claude Code CLI (with `-p` headless mode)
+- `gh` — GitHub CLI (authenticated)
+- `git`
+- Python 3.11+
+- yeast-bot GitHub account added as a repo collaborator (for agent PR creation); configure
+  via `GH_TOKEN`
 
 ## Installation
 
@@ -12,115 +28,53 @@ sub-agents in parallel, monitors their output, and merges results back to the de
 uv sync
 ```
 
-Requires Python 3.11+ and the following tools on `$PATH`:
-
-- `claude` — Claude Code CLI (`claude -p` headless mode)
-- `gh` — GitHub CLI (authenticated)
-- `git`
-
-## Pipeline
-
-```
-spec → init → plan → research → design → scoping → implementation
-```
-
-Each stage is triggered via `brimstone run --<stage>`.
-See `CLAUDE.md` for the full orchestration protocol.
-
-## Commands
-
-```
-brimstone init    Create a GitHub repo and set it up for the pipeline
-brimstone run     Run one or more pipeline stages for a milestone
-brimstone health  Preflight checks (credentials, repo state, active worktrees)
-brimstone cost    Cost ledger summary
-brimstone adopt   Adopt an existing repo (not yet implemented)
-```
-
-### `brimstone init`
-
-Creates the GitHub repo (if it does not already exist), clones it locally, adds
-`yeast-bot` as a collaborator, installs the CI workflow, creates issue labels, and
-sets branch protection.
+## Quick Start
 
 ```bash
-brimstone init OWNER/REPO
-brimstone init OWNER/REPO --dry-run
+# Scope a milestone (decompose a spec into research issues)
+brimstone run --stage scope --repo OWNER/REPO --milestone v0.2.0
+
+# Run the full impl pipeline (research + design handled separately first)
+brimstone run --stage impl --repo OWNER/REPO --milestone v0.2.0
 ```
 
-Run once per new repository, then use `brimstone run --plan` to seed research issues.
-
-### `brimstone run --plan`
-
-Seeds a spec into the repo and decomposes it into `stage/research` GitHub issues.
-The milestone name is inferred from the spec filename stem.
-
-```bash
-# Single milestone — milestone inferred from filename (v0.1.0-cold-start)
-brimstone run --plan --repo OWNER/REPO \
-              --spec /path/to/v0.1.0-cold-start.md
-
-# Multiple milestones in one invocation
-brimstone run --plan --repo OWNER/REPO \
-              --spec /path/to/v0.1.0.md \
-              --spec /path/to/v0.2.0.md \
-              --spec /path/to/v0.3.0.md
-
-# Explicit milestone name (overrides stem inference)
-brimstone run --plan --repo OWNER/REPO \
-              --spec /path/to/spec.md --milestone v0.1.0-cold-start
-```
-
-### `brimstone run`
-
-```bash
-# Research stage
-brimstone run --research --repo OWNER/REPO --milestone "v0.1.0-cold-start"
-
-# Design stage (after research completes)
-brimstone run --design --repo OWNER/REPO --milestone "v0.1.0-cold-start"
-
-# Implementation stage
-brimstone run --impl --repo OWNER/REPO --milestone "v0.1.0-cold-start"
-
-# All stages in order (research → design → impl)
-brimstone run --all --repo OWNER/REPO --milestone "v0.1.0-cold-start"
-```
-
-Common flags: `--dry-run`, `--model <model-id>`, `--max-budget <usd>`.
-
-### `--repo` resolution
+## `--repo` Resolution
 
 | Invocation | Behaviour |
 |---|---|
-| *(no flag)* | Operates on the current working directory. Fails if cwd is not a git repo. |
-| `--repo owner/name` | Clones the remote repo to a temp dir and operates on it. |
-| `--repo path/to/local/dir` | Operates on the local directory. Fails if not a git repo. |
+| `--repo OWNER/REPO` | Uses the specified GitHub repo |
+| `BRIMSTONE_REPO=OWNER/REPO` env var | Fallback when `--repo` is not passed |
+| *(no flag, no env var)* | Auto-detects from `git remote get-url origin` in CWD |
 
 ## Module Listing
 
 ```
 src/brimstone/
-├── cli.py          ← Click entry point: brimstone (subcommands: run, init, health, cost, adopt)
-├── config.py       ← Config pydantic-settings model; env/flag resolution; subprocess env builder
-├── runner.py       ← claude -p subprocess invocation; stream-json capture; RunResult
-├── session.py      ← Session ID persistence and --resume logic
-├── logger.py       ← Per-session JSONL logging and cost ledger
-├── health.py       ← Preflight checks (claude, gh, git, credentials, worktrees)
+├── cli.py          ← Entry point: brimstone run, health, cost, init; Watchdog; MergeQueue
+├── config.py       ← Config pydantic-settings model; env/flag resolution; subprocess env
+├── runner.py       ← claude -p subprocess invocation; stream-json parsing; RunResult
+├── session.py      ← Checkpoint (schema v3): run metadata + backoff state
+├── beads.py        ← WorkBead, PRBead, MergeQueue, BeadStore; atomic bead I/O
+├── logger.py       ← Four JSONL log streams; cost ledger; prompt cache accounting
+├── health.py       ← Preflight checks: credentials, gh CLI, git, yeast-bot collaborator
 └── skills/
-    ├── impl-worker.md      ← Bundled system prompt for the implementation stage
-    ├── research-worker.md  ← Bundled system prompt for the research stage
-    ├── design-worker.md    ← Bundled system prompt for the design stage
-    └── plan-milestones.md  ← Bundled system prompt for brimstone run --plan
+    ├── impl-worker.md      ← Prompt for implementation stage agents
+    ├── research-worker.md  ← Prompt for research stage agents
+    ├── design-worker.md    ← Prompt for design stage agents
+    └── scope-worker.md     ← Prompt for scope stage agents
 ```
 
 ## Key Types
 
-- `Config` (`config.py`) — validated configuration; loaded from environment + CLI flags
-- `Checkpoint` (`session.py`) — persisted session state for `--resume`
-- `RunResult` (`runner.py`) — result of a single `claude -p` invocation
-- `HealthReport` (`health.py`) — preflight check outcome with fatal/warn status
-- `UsageGovernor` (`cli.py`) — enforces concurrency limits and rate-limit backoff
+| Type | Module | Purpose |
+|------|--------|---------|
+| `Config` | `config.py` | Validated configuration; loaded from environment + CLI flags |
+| `RunResult` | `runner.py` | Result of a single `claude -p` invocation |
+| `Checkpoint` | `session.py` | Run metadata and backoff state (schema v3) |
+| `BeadStore` | `beads.py` | Atomic read/write for WorkBead, PRBead, MergeQueue files |
+| `WorkBead` | `beads.py` | Issue lifecycle state (open → claimed → pr_open → closed) |
+| `PRBead` | `beads.py` | PR lifecycle state (open → ci_running → merge_ready → merged) |
+| `MergeQueue` | `beads.py` | Ordered list of PRs ready to squash merge |
 
 ## Configuration
 
@@ -129,14 +83,49 @@ Set environment variables or create a `.env` file in the working directory:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ANTHROPIC_API_KEY` | Yes | — | Anthropic API key |
-| `BRIMSTONE_GH_TOKEN` or `GH_TOKEN` | Yes | — | GitHub token passed to sub-agents |
+| `GH_TOKEN` | Yes | — | GitHub token for yeast-bot; used by sub-agents to create PRs and push branches |
 | `BRIMSTONE_MODEL` | No | `claude-opus-4-6` | Claude model ID |
-| `BRIMSTONE_MAX_BUDGET_USD` | No | `5.00` | USD budget cap per session |
+| `BRIMSTONE_MAX_BUDGET_USD` | No | `5.00` | USD budget cap per session (API key mode only) |
 | `BRIMSTONE_MAX_CONCURRENCY` | No | `5` | Max parallel sub-agents |
 | `BRIMSTONE_AGENT_TIMEOUT_MINUTES` | No | `30` | Timeout per sub-agent |
-| `BRIMSTONE_DEFAULT_BRANCH` | No | — | Enforce a specific default branch name |
 | `BRIMSTONE_LOG_DIR` | No | `~/.brimstone/logs` | Session logs and cost ledger |
-| `BRIMSTONE_CHECKPOINT_DIR` | No | `~/.brimstone/checkpoints` | Session checkpoints |
+| `BRIMSTONE_CHECKPOINT_DIR` | No | `~/.brimstone/checkpoints` | Run checkpoints |
+| `BRIMSTONE_BEADS_DIR` | No | `~/.brimstone/beads` | Bead files root directory |
+| `BRIMSTONE_STATE_REPO` | No | — | Optional git repo URL for pushing bead state |
+| `BRIMSTONE_STATE_REPO_DIR` | No | — | Local clone path for `BRIMSTONE_STATE_REPO` |
+| `BRIMSTONE_REPO` | No | — | Default target repo (`OWNER/REPO`); overridable with `--repo` |
+
+## State Files
+
+```
+~/.brimstone/
+  checkpoints/
+    impl.checkpoint.json        ← Run metadata + backoff state (schema v3)
+    research.checkpoint.json
+  logs/
+    cost.jsonl                  ← Permanent cost ledger (append-only)
+    sessions/
+      <session-id>.jsonl        ← Per-agent execution log
+    conductor/
+      <run-id>.jsonl            ← Orchestrator decisions and stage transitions
+  beads/
+    <owner>/
+      <repo>/
+        work/
+          <N>.json              ← WorkBead per issue
+        prs/
+          pr-<N>.json           ← PRBead per PR
+        merge-queue.json        ← MergeQueue
+```
+
+## Commands
+
+```
+brimstone run     Run one pipeline stage for a milestone
+brimstone health  Preflight checks (credentials, repo state, yeast-bot, worktrees)
+brimstone cost    Cost ledger summary
+brimstone init    Scaffold a repo (add yeast-bot, install CI workflow, create labels)
+```
 
 ## Dependencies
 
