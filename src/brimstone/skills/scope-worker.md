@@ -1,6 +1,6 @@
-Start the plan-issues orchestrator for this repository in autonomous mode.
+Start the scope worker for this repository in autonomous mode.
 
-The plan-issues orchestrator reads the completed design documents (HLD and per-module LLDs)
+The scope worker reads the completed design documents (HLD and per-module LLDs)
 and produces fully-specified GitHub implementation issues with acceptance criteria, file scope,
 test requirements, and a verified dependency graph. It runs **after** design-worker has merged
 all design docs and **before** impl-worker begins. It creates GitHub issues only — no code,
@@ -34,7 +34,7 @@ All `git` commands must be run with `-C <local_path>` (or inside the cloned dire
 
 ## Inputs
 
-The plan-issues orchestrator requires:
+The scope worker requires:
 - `--repo` — the target repository (optional; defaults to cwd)
 - `--milestone` — the milestone to file impl issues against (e.g. `v0.1.0`)
 
@@ -190,9 +190,9 @@ Print a full summary to stdout:
 
 ## Constraints
 
-- **GitHub issues only** — plan-issues creates GitHub issues only; never touches source files,
+- **GitHub issues only** — scope-worker creates GitHub issues only; never touches source files,
   design docs, or any file in the repository
-- **No sub-agents** — plan-issues does not launch sub-agents; all work happens in this session
+- **No sub-agents** — scope-worker does not launch sub-agents; all work happens in this session
 - **Spec first** — every issue must have acceptance criteria and scope before being filed
 - **One issue per logical unit per module** — split by module boundary (see CLAUDE.md module
   isolation table); do not create cross-module issues
