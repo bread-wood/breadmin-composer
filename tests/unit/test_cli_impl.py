@@ -223,7 +223,7 @@ class TestListOpenImplIssues:
 
     def test_filters_out_research_issues(self) -> None:
         issues = [
-            make_issue(number=1, labels=["research"]),
+            make_issue(number=1, labels=["stage/research"]),
             make_issue(number=2, labels=["feat:config"]),
         ]
         result = self._call(json.dumps(issues))
@@ -385,29 +385,29 @@ class TestGetPrChecksStatus:
 
     def test_returns_pass_when_all_succeed(self) -> None:
         checks = [
-            {"name": "ci", "status": "completed", "conclusion": "success"},
-            {"name": "lint", "status": "completed", "conclusion": "success"},
+            {"name": "ci", "state": "completed", "bucket": "pass"},
+            {"name": "lint", "state": "completed", "bucket": "pass"},
         ]
         assert self._call(json.dumps(checks)) == "pass"
 
     def test_returns_fail_when_any_failed(self) -> None:
         checks = [
-            {"name": "ci", "status": "completed", "conclusion": "failure"},
-            {"name": "lint", "status": "completed", "conclusion": "success"},
+            {"name": "ci", "state": "completed", "bucket": "fail"},
+            {"name": "lint", "state": "completed", "bucket": "pass"},
         ]
         assert self._call(json.dumps(checks)) == "fail"
 
     def test_returns_pending_when_any_in_progress(self) -> None:
         checks = [
-            {"name": "ci", "status": "in_progress", "conclusion": None},
-            {"name": "lint", "status": "completed", "conclusion": "success"},
+            {"name": "ci", "state": "in_progress", "bucket": "pending"},
+            {"name": "lint", "state": "completed", "bucket": "pass"},
         ]
         assert self._call(json.dumps(checks)) == "pending"
 
     def test_fail_takes_priority_over_pending(self) -> None:
         checks = [
-            {"name": "ci", "status": "in_progress", "conclusion": None},
-            {"name": "lint", "status": "completed", "conclusion": "failure"},
+            {"name": "ci", "state": "in_progress", "bucket": "pending"},
+            {"name": "lint", "state": "completed", "bucket": "fail"},
         ]
         assert self._call(json.dumps(checks)) == "fail"
 
@@ -592,7 +592,7 @@ class TestMonitorPr:
 
     def test_passes_and_merges_when_ci_passes(self) -> None:
         """When CI passes and no changes requested, squash merge is called."""
-        checks = [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        checks = [{"name": "ci", "state": "completed", "bucket": "pass"}]
         reviews = {"reviews": []}
         merge_result = make_gh_result(returncode=0)
 
@@ -653,8 +653,8 @@ class TestMonitorPr:
 
     def test_attempts_rebase_on_conflict(self) -> None:
         """When conflict is detected, _rebase_branch is called."""
-        fail_checks = [{"name": "ci", "status": "completed", "conclusion": "failure"}]
-        pass_checks = [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        fail_checks = [{"name": "ci", "state": "completed", "bucket": "fail"}]
+        pass_checks = [{"name": "ci", "state": "completed", "bucket": "pass"}]
         call_count = {"n": 0}
 
         def gh_side_effect(args, **kwargs):
@@ -864,7 +864,7 @@ class TestRunImplWorkerClaiming:
         ]
 
         with (
-            patch("brimstone.cli._list_open_impl_issues", side_effect=[issues, []]),
+            patch("brimstone.cli._list_open_impl_issues", side_effect=[issues, [], []]),
             patch("brimstone.cli._claim_issue") as mock_claim,
             patch("brimstone.cli._create_worktree", return_value="/tmp/wt"),
             patch("brimstone.cli._dispatch_impl_agent") as mock_dispatch,
@@ -947,7 +947,7 @@ class TestRunImplWorkerRateLimitHandling:
         )
 
         with (
-            patch("brimstone.cli._list_open_impl_issues", side_effect=[issues, []]),
+            patch("brimstone.cli._list_open_impl_issues", side_effect=[issues, [], []]),
             patch("brimstone.cli._claim_issue"),
             patch("brimstone.cli._unclaim_issue") as mock_unclaim,
             patch("brimstone.cli._create_worktree", return_value="/tmp/wt"),

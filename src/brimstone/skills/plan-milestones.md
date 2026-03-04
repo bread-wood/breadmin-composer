@@ -90,10 +90,11 @@ Excluded (next version): <from spec Non-Goals section>
 Constraints: <from spec Constraints section>
 ```
 
-**Version naming**: use a meaningful identifier (MVP, v1.1, v2, etc.) — not M3/M4.
-The milestone title is the version name only (e.g. `v1`, `MVP`). Do NOT append "Research"
-or "Implementation" — all stages for a version share one milestone; workers select work
-by `stage/*` label, not by milestone name.
+**Version naming**: Use the **exact version string from `## Session Parameters → Version`** —
+do not shorten, normalize, or rename it. If `Version: v0.1.0` is provided, the milestone title
+must be `v0.1.0`, not `v0.1` or `0.1.0`. Do NOT append "Research" or "Implementation" — all
+stages for a version share one milestone; workers select work by `stage/*` label, not by
+milestone name.
 
 ### Step 3 — Create Milestone
 
@@ -188,7 +189,7 @@ else
   gh issue create \
     --repo <owner>/<repo> \
     --title "$TITLE" \
-    --label "research,stage/research" \
+    --label "stage/research" \
     --milestone "<Version>" \
     --body "$(cat <<'EOF'
 ## Why This Matters
@@ -224,19 +225,6 @@ Print:
 - Scope boundaries: what's in, what's out, what's deferred
 - Suggested dispatch order: which issues to send to research-worker first (dependency order)
 
-File the next pipeline stage issue (skip if it already exists):
-```bash
-PIPELINE_TITLE="Run research-worker for <version>"
-if echo "$EXISTING_ISSUES" | grep -qxF "$PIPELINE_TITLE"; then
-  echo "Pipeline issue '$PIPELINE_TITLE' already exists — skipping"
-else
-  gh issue create \
-    --repo <owner>/<repo> \
-    --title "$PIPELINE_TITLE" \
-    --label "pipeline" \
-    --milestone "<version>"
-fi
-```
 
 ## Constraints
 

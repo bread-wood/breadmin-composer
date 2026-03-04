@@ -132,11 +132,14 @@ def test_conductor_subscription_tier_max20x(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_missing_anthropic_api_key_raises_configuration_error(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """load_config() raises ConfigurationError when ANTHROPIC_API_KEY is absent."""
+    monkeypatch.chdir(tmp_path)  # no .env file here — prevents pydantic-settings from reading it
     monkeypatch.delenv("CLAUDECODE", raising=False)
     monkeypatch.setenv("BRIMSTONE_GH_TOKEN", "ghp-test-token")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("BRIMSTONE_ANTHROPIC_API_KEY", raising=False)
 
     with pytest.raises(ConfigurationError) as exc_info:
         load_config()
@@ -146,12 +149,15 @@ def test_missing_anthropic_api_key_raises_configuration_error(
 
 def test_missing_github_token_raises_configuration_error(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """load_config() raises ConfigurationError when BRIMSTONE_GH_TOKEN is absent."""
+    monkeypatch.chdir(tmp_path)  # no .env file here — prevents pydantic-settings from reading it
     monkeypatch.delenv("CLAUDECODE", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("BRIMSTONE_GH_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
 
     with pytest.raises(ConfigurationError) as exc_info:
         load_config()

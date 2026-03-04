@@ -1,6 +1,6 @@
 """Preflight health checks for brimstone commands.
 
-Runs 11 ordered checks at worker startup. Distinguishes fatal checks (abort)
+Runs 13 ordered checks at worker startup. Distinguishes fatal checks (abort)
 from warnings (proceed with caution). Manages the single-orchestrator lock file.
 Powers `brimstone health`.
 """
@@ -71,7 +71,7 @@ def check_all(
     checkpoint: Checkpoint | None = None,
     skip_checks: frozenset[str] = frozenset(),
 ) -> HealthReport:
-    """Run all 11 preflight checks in order.
+    """Run all 13 preflight checks in order.
 
     Short-circuits on any "fail" result — remaining checks get status "skip".
     Computes overall as worst status across all non-skip results.
@@ -91,6 +91,8 @@ def check_all(
         ("Default branch matches config", lambda: _check_default_branch(config)),
         ("gh CLI authenticated", _check_gh_auth),
         ("ANTHROPIC_API_KEY present", lambda: _check_api_key(config)),
+        ("BRIMSTONE_GH_TOKEN present", _check_bot_token),
+        ("yeast-bot is repo collaborator", lambda: _check_bot_collaborator(config)),
         ("No active worktrees", _check_worktrees),
         ("No stale in-progress issues", lambda: _check_orphaned_issues(config)),
         ("Open PRs needing attention", lambda: _check_open_prs(config)),
@@ -194,12 +196,17 @@ def _check_default_branch(config: Config) -> CheckResult:
 
     actual_branch = result.stdout.strip()
 
-    configured_branch = getattr(config, "default_branch", None)
+    # Only verify against config when the env var was explicitly set.
+    # The config default ("main") is not meaningful without explicit user intent.
+    configured_branch = os.environ.get("BRIMSTONE_DEFAULT_BRANCH", "").strip()
     if not configured_branch:
         return CheckResult(
             name="Default branch matches config",
             status="pass",
-            message=f"Repo default branch is '{actual_branch}' (no config override set).",
+            message=(
+                f"Repo default branch is '{actual_branch}'. "
+                "Set BRIMSTONE_DEFAULT_BRANCH to enforce a specific branch name."
+            ),
         )
 
     if actual_branch == configured_branch:
@@ -212,7 +219,7 @@ def _check_default_branch(config: Config) -> CheckResult:
     return CheckResult(
         name="Default branch matches config",
         status="warn",
-        message=f"Mismatch: config={configured_branch}, repo={actual_branch}",
+        message=f"Mismatch: BRIMSTONE_DEFAULT_BRANCH={configured_branch}, repo={actual_branch}",
         remediation=(
             f"Set BRIMSTONE_DEFAULT_BRANCH={actual_branch} or update config to match "
             f"the repo's default branch ({actual_branch})."
@@ -258,6 +265,143 @@ def _check_api_key(config: Config) -> CheckResult:
     )
 
 
+def _check_bot_token() -> CheckResult:
+    """Check: BRIMSTONE_GH_TOKEN present (required for yeast-bot operations)."""
+    token = os.environ.get("BRIMSTONE_GH_TOKEN") or ""
+    if token:
+        return CheckResult(
+            name="BRIMSTONE_GH_TOKEN present",
+            status="pass",
+            message="BRIMSTONE_GH_TOKEN is set.",
+        )
+    return CheckResult(
+        name="BRIMSTONE_GH_TOKEN present",
+        status="fail",
+        message="BRIMSTONE_GH_TOKEN is not set.",
+        remediation=(
+            "Set BRIMSTONE_GH_TOKEN to yeast-bot's GitHub token. "
+            "Without it, yeast-bot cannot accept repo invitations or be assigned to issues."
+        ),
+    )
+
+
+def _check_bot_collaborator(config: Config) -> CheckResult:
+    """Check: yeast-bot is an active collaborator on the target repo.
+
+    If yeast-bot is missing, auto-adds them (using the owner's ambient gh auth)
+    and accepts the invitation using BRIMSTONE_GH_TOKEN.
+    """
+    repo = config.github_repo or ""
+    if not repo:
+        return CheckResult(
+            name="yeast-bot is repo collaborator",
+            status="skip",
+            message="No target repo configured; skipping collaborator check.",
+        )
+
+    # Check current collaborator status
+    check = subprocess.run(
+        ["gh", "api", f"repos/{repo}/collaborators/yeast-bot", "--silent"],
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode == 0:
+        return CheckResult(
+            name="yeast-bot is repo collaborator",
+            status="pass",
+            message=f"yeast-bot is an active collaborator on {repo}.",
+        )
+
+    # Not a collaborator — auto-add using the owner's gh credentials
+    add = subprocess.run(
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/collaborators/yeast-bot",
+            "-X",
+            "PUT",
+            "-f",
+            "permission=push",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if add.returncode != 0:
+        return CheckResult(
+            name="yeast-bot is repo collaborator",
+            status="fail",
+            message=(
+                f"yeast-bot is not a collaborator on {repo} and auto-add failed: "
+                f"{add.stderr.strip()}"
+            ),
+            remediation=(
+                f"Run: gh api repos/{repo}/collaborators/yeast-bot -X PUT -f permission=push"
+            ),
+        )
+
+    # Accept the invitation as yeast-bot using BRIMSTONE_GH_TOKEN
+    token = os.environ.get("BRIMSTONE_GH_TOKEN") or ""
+    if not token:
+        return CheckResult(
+            name="yeast-bot is repo collaborator",
+            status="fail",
+            message=(
+                f"Added yeast-bot to {repo} but BRIMSTONE_GH_TOKEN is not set; "
+                "cannot auto-accept the invitation."
+            ),
+            remediation=(
+                "Set BRIMSTONE_GH_TOKEN to yeast-bot's token, then re-run brimstone health."
+            ),
+        )
+
+    list_result = subprocess.run(
+        [
+            "curl",
+            "-s",
+            "-H",
+            f"Authorization: token {token}",
+            "https://api.github.com/user/repository_invitations",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        invitations = json.loads(list_result.stdout)
+        matching_ids = [
+            inv["id"]
+            for inv in invitations
+            if inv.get("repository", {}).get("full_name", "") == repo
+        ]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        matching_ids = []
+
+    for inv_id in matching_ids:
+        subprocess.run(
+            [
+                "curl",
+                "-s",
+                "-o",
+                "/dev/null",
+                "-X",
+                "PATCH",
+                "-H",
+                f"Authorization: token {token}",
+                f"https://api.github.com/user/repository_invitations/{inv_id}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    return CheckResult(
+        name="yeast-bot is repo collaborator",
+        status="pass",
+        message=(
+            f"Added yeast-bot as collaborator on {repo} and accepted "
+            f"{len(matching_ids)} invitation(s)."
+        ),
+    )
+
+
 def _check_worktrees() -> CheckResult:
     """Check 5: No active worktrees under .claude/worktrees/."""
     result = subprocess.run(
@@ -289,29 +433,34 @@ def _check_worktrees() -> CheckResult:
             message="No worktrees found under .claude/worktrees/.",
         )
 
-    now = datetime.now(UTC)
-    count = len(stale)
-    msg_lines = [f"{count} worktree(s) found under .claude/worktrees/:"]
-    remediation_paths: list[str] = []
+    removed: list[str] = []
+    failed: list[str] = []
     for path in stale:
-        try:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-            age = now - mtime
-            age_days = age.days
-            age_str = f"{age_days} day(s) old" if age_days >= 1 else "less than 1 day old"
-            msg_lines.append(f"  {path} ({age_str})")
-        except OSError:
-            msg_lines.append(f"  {path}")
-        remediation_paths.append(str(path))
+        r = subprocess.run(
+            ["git", "worktree", "remove", "--force", str(path)],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode == 0:
+            removed.append(str(path))
+        else:
+            failed.append(str(path))
 
-    remediation = "Stale worktrees found. Remove with:\n" + "\n".join(
-        f"  git worktree remove --force {p}" for p in remediation_paths
+    if not failed:
+        return CheckResult(
+            name="No active worktrees",
+            status="pass",
+            message=f"Removed {len(removed)} stale worktree(s).",
+        )
+
+    remediation = "Could not remove some worktrees automatically. Remove with:\n" + "\n".join(
+        f"  git worktree remove --force {p}" for p in failed
     )
-
+    msg = f"Removed {len(removed)}, failed to remove {len(failed)} worktree(s)."
     return CheckResult(
         name="No active worktrees",
         status="warn",
-        message="\n".join(msg_lines),
+        message=msg,
         remediation=remediation,
     )
 

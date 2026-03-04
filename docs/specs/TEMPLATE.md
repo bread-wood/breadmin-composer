@@ -125,7 +125,15 @@ product-name <required-arg> [--optional-flag VALUE]
 > - **P1** — must be resolved before design begins (blocking)
 > - **P2** — should be resolved before scoping begins (important but not blocking)
 >
-> Write as a question whose answer determines an implementation approach.
+> Write as a question whose answer determines an implementation approach. Do NOT
+> enumerate specific technologies or solutions in the question — that is the research
+> agent's job. Ask what needs to be decided, not how to decide it.
+>
+> **Frame unknowns across the product's lifetime, not just the current version.**
+> If the answer today will need revisiting in the next version, the scope boundary is
+> in the wrong place — either pull the question forward or explicitly note the future
+> constraint in the question itself. An unknown that optimises only for the current
+> version's constraints is a deferred design mistake.
 
 1. **[P1]** [Question: answer changes the core architecture or a major design decision]
 2. **[P2]** [Question: answer changes a module-level design but not the overall architecture]
@@ -228,9 +236,8 @@ calc '<expression>'
 
 ## Key Unknowns
 
-1. **[P1]** Which parsing strategy — recursive descent, Pratt/shunting-yard, or sandboxed
-   `eval` — best fits the simplicity and safety constraints? The answer determines the
-   core architecture of the parser module and whether `eval` is acceptable.
+1. **[P1]** What parsing strategy best fits the simplicity and safety constraints?
+   The answer determines the core architecture of the parser module.
 
 ---
 

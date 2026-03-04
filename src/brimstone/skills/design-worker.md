@@ -82,18 +82,23 @@ If `docs/design/HLD.md` doesn't exist or is outdated relative to the research fi
    git commit -m "docs: add HLD for <research-milestone> [skip ci]"
    ```
 
-3. Push branch — do NOT create a PR. The orchestrator merges directly:
+3. Push and create a PR:
    ```bash
    git push -u origin <branch-name>
+   gh pr create --repo <owner>/<repo> \
+     --title "docs: HLD for <research-milestone> [skip ci]" \
+     --label "stage/design" \
+     --body "Closes #<issue-number>
+
+   ## Summary
+   HLD for <research-milestone>.
+   "
    ```
-   Then merge via GitHub API (no PR):
+4. Wait for CI (skipped) and stop — the orchestrator merges:
    ```bash
-   gh api repos/<owner>/<repo>/merges --method POST \
-     -f base=$DEFAULT_BRANCH -f head=<branch-name> \
-     -f commit_message="docs: merge HLD for <research-milestone> [skip ci]"
-   gh api repos/<owner>/<repo>/git/refs/heads/<branch-name> --method DELETE
-   git checkout $DEFAULT_BRANCH && git pull origin $DEFAULT_BRANCH
+   gh pr checks <PR-number> --watch
    ```
+   STOP. Do not merge.
 
 5. Continue to LLDs.
 
@@ -123,15 +128,19 @@ For each module in the CLAUDE.md module isolation table that needs a design doc:
    git commit -m "docs: add LLD for <module> (<research-milestone>) [skip ci]"
    ```
 
-5. Push branch — do NOT create a PR. Merge directly:
+5. Push and create a PR:
    ```bash
    git push -u origin lld-<module>-<research-milestone-slug>
-   gh api repos/<owner>/<repo>/merges --method POST \
-     -f base=$DEFAULT_BRANCH -f head=lld-<module>-<research-milestone-slug> \
-     -f commit_message="docs: merge LLD for <module> (<research-milestone>) [skip ci]"
-   gh api repos/<owner>/<repo>/git/refs/heads/lld-<module>-<research-milestone-slug> --method DELETE
-   git checkout $DEFAULT_BRANCH && git pull origin $DEFAULT_BRANCH
+   gh pr create --repo <owner>/<repo> \
+     --title "docs: LLD for <module> (<research-milestone>) [skip ci]" \
+     --label "stage/design" \
+     --body "Closes #<issue-number>
+
+   ## Summary
+   LLD for the <module> module.
+   "
    ```
+   STOP. Do not merge. The orchestrator monitors and squash-merges each LLD PR.
 
 Repeat for each module that requires a design doc.
 

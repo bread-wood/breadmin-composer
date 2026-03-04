@@ -17,6 +17,8 @@ from brimstone.health import (
     HealthReport,
     _check_api_key,
     _check_backoff,
+    _check_bot_collaborator,
+    _check_bot_token,
     _check_checkpoint_dir_writable,
     _check_default_branch,
     _check_gh_auth,
@@ -81,7 +83,7 @@ def _pass(name: str) -> CheckResult:
 
 
 def _all_pass_patches() -> list:
-    """Return a list of patch context managers for all 11 checks returning pass."""
+    """Return a list of patch context managers for all 13 checks returning pass."""
     return [
         patch("brimstone.health._check_git_repo", return_value=_pass("Git repo present")),
         patch(
@@ -95,6 +97,14 @@ def _all_pass_patches() -> list:
         patch(
             "brimstone.health._check_api_key",
             return_value=_pass("ANTHROPIC_API_KEY present"),
+        ),
+        patch(
+            "brimstone.health._check_bot_token",
+            return_value=_pass("BRIMSTONE_GH_TOKEN present"),
+        ),
+        patch(
+            "brimstone.health._check_bot_collaborator",
+            return_value=_pass("yeast-bot is repo collaborator"),
         ),
         patch(
             "brimstone.health._check_worktrees",
@@ -167,8 +177,8 @@ def test_health_report_fields() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_check_all_returns_11_results(tmp_path: Path) -> None:
-    """check_all always returns exactly 11 CheckResult items."""
+def test_check_all_returns_13_results(tmp_path: Path) -> None:
+    """check_all always returns exactly 13 CheckResult items."""
     config = make_config(tmp_path)
     patches = _all_pass_patches()
     with (
@@ -183,9 +193,11 @@ def test_check_all_returns_11_results(tmp_path: Path) -> None:
         patches[8],
         patches[9],
         patches[10],
-    ):  # noqa: E501
+        patches[11],
+        patches[12],
+    ):
         report = check_all(config)
-    assert len(report.checks) == 11
+    assert len(report.checks) == 13
 
 
 def test_check_all_overall_pass_when_all_pass(tmp_path: Path) -> None:
@@ -204,7 +216,9 @@ def test_check_all_overall_pass_when_all_pass(tmp_path: Path) -> None:
         patches[8],
         patches[9],
         patches[10],
-    ):  # noqa: E501
+        patches[11],
+        patches[12],
+    ):
         report = check_all(config)
     assert report.overall == "pass"
     assert report.fatal is False
@@ -215,8 +229,8 @@ def test_check_all_overall_warn_with_warn_check(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     warn_result = CheckResult("No active worktrees", "warn", "2 found", "Remove them")
     patches = _all_pass_patches()
-    # Override check 5 (worktrees) with a warn
-    patches[4] = patch("brimstone.health._check_worktrees", return_value=warn_result)
+    # Override check 7 (worktrees, now at index 6) with a warn
+    patches[6] = patch("brimstone.health._check_worktrees", return_value=warn_result)
     with (
         patches[0],
         patches[1],
@@ -229,7 +243,9 @@ def test_check_all_overall_warn_with_warn_check(tmp_path: Path) -> None:
         patches[8],
         patches[9],
         patches[10],
-    ):  # noqa: E501
+        patches[11],
+        patches[12],
+    ):
         report = check_all(config)
     assert report.overall == "warn"
     assert report.fatal is False
@@ -254,14 +270,16 @@ def test_check_all_short_circuits_on_fail(tmp_path: Path) -> None:
         patches[8],
         patches[9],
         patches[10],
-    ):  # noqa: E501
+        patches[11],
+        patches[12],
+    ):
         report = check_all(config)
 
     assert report.overall == "fail"
     assert report.fatal is True
-    # Checks 5–11 (indices 4–10) should all be skipped
+    # Checks 5–13 (indices 4–12) should all be skipped
     skipped = [c for c in report.checks if c.status == "skip"]
-    assert len(skipped) == 7
+    assert len(skipped) == 9
 
 
 def test_check_all_fatal_true_on_fail(tmp_path: Path) -> None:
@@ -282,7 +300,9 @@ def test_check_all_fatal_true_on_fail(tmp_path: Path) -> None:
         patches[8],
         patches[9],
         patches[10],
-    ):  # noqa: E501
+        patches[11],
+        patches[12],
+    ):
         report = check_all(config)
     assert report.fatal is True
 
@@ -329,11 +349,14 @@ def test_check_default_branch_warn_on_gh_error(tmp_path: Path) -> None:
 
 
 def test_check_default_branch_warn_on_mismatch(tmp_path: Path) -> None:
-    """Returns warn when actual branch differs from configured branch."""
+    """Returns warn when BRIMSTONE_DEFAULT_BRANCH is set and differs from repo branch."""
     config = make_config(tmp_path, default_branch="main")
-    with patch(
-        "subprocess.run",
-        return_value=_subprocess_result(returncode=0, stdout="master\n"),
+    with (
+        patch(
+            "subprocess.run",
+            return_value=_subprocess_result(returncode=0, stdout="master\n"),
+        ),
+        patch.dict("os.environ", {"BRIMSTONE_DEFAULT_BRANCH": "main"}),
     ):
         result = _check_default_branch(config)
     assert result.status == "warn"
@@ -402,6 +425,7 @@ def test_check_api_key_fail_makes_report_fatal(tmp_path: Path) -> None:
         patches[8],
         patches[9],
         patches[10],
+        patches[11],
     ):  # noqa: E501
         report = check_all(config)
 
@@ -409,6 +433,104 @@ def test_check_api_key_fail_makes_report_fatal(tmp_path: Path) -> None:
     assert report.overall == "fail"
     skipped = [c for c in report.checks if c.status == "skip"]
     assert len(skipped) > 0
+
+
+# ---------------------------------------------------------------------------
+# _check_bot_token
+# ---------------------------------------------------------------------------
+
+
+def test_check_bot_token_pass() -> None:
+    """Returns pass when BRIMSTONE_GH_TOKEN is set."""
+    with patch.dict("os.environ", {"BRIMSTONE_GH_TOKEN": "ghp_fake_token"}):
+        result = _check_bot_token()
+    assert result.status == "pass"
+
+
+def test_check_bot_token_fail_when_unset() -> None:
+    """Returns fail when BRIMSTONE_GH_TOKEN is absent."""
+    env = {k: v for k, v in os.environ.items() if k != "BRIMSTONE_GH_TOKEN"}
+    with patch.dict("os.environ", env, clear=True):
+        result = _check_bot_token()
+    assert result.status == "fail"
+    assert result.remediation is not None
+
+
+# ---------------------------------------------------------------------------
+# _check_bot_collaborator
+# ---------------------------------------------------------------------------
+
+
+def test_check_bot_collaborator_skip_when_no_repo(tmp_path: Path) -> None:
+    """Returns skip when config.github_repo is not set."""
+    config = make_config(tmp_path)  # github_repo defaults to None
+    result = _check_bot_collaborator(config)
+    assert result.status == "skip"
+
+
+def test_check_bot_collaborator_pass_when_active(tmp_path: Path) -> None:
+    """Returns pass when gh API confirms yeast-bot is a collaborator."""
+    config = make_config(tmp_path, github_repo="owner/repo")
+    check_ok = _subprocess_result(returncode=0)
+    with patch("subprocess.run", return_value=check_ok):
+        result = _check_bot_collaborator(config)
+    assert result.status == "pass"
+    assert "active collaborator" in result.message
+
+
+def test_check_bot_collaborator_auto_adds_and_accepts(tmp_path: Path) -> None:
+    """When not a collaborator, adds yeast-bot and accepts the invitation."""
+    config = make_config(tmp_path, github_repo="owner/repo")
+    # First call: check returns 404 (not a collaborator)
+    check_fail = _subprocess_result(returncode=1, stderr="Not Found")
+    # Second call: PUT add returns success
+    add_ok = _subprocess_result(returncode=0)
+    # Third call: curl list invitations
+    inv_list = _subprocess_result(
+        returncode=0,
+        stdout=json.dumps([{"id": 123, "repository": {"full_name": "owner/repo"}}]),
+    )
+    # Fourth call: curl PATCH accept
+    accept_ok = _subprocess_result(returncode=0, stdout="204")
+
+    with (
+        patch("subprocess.run", side_effect=[check_fail, add_ok, inv_list, accept_ok]),
+        patch.dict("os.environ", {"BRIMSTONE_GH_TOKEN": "ghp_fake_token"}),
+    ):
+        result = _check_bot_collaborator(config)
+
+    assert result.status == "pass"
+    assert "Added yeast-bot" in result.message
+
+
+def test_check_bot_collaborator_fail_when_add_fails(tmp_path: Path) -> None:
+    """Returns fail if the auto-add gh API call fails."""
+    config = make_config(tmp_path, github_repo="owner/repo")
+    check_fail = _subprocess_result(returncode=1, stderr="Not Found")
+    add_fail = _subprocess_result(returncode=1, stderr="Forbidden")
+
+    with patch("subprocess.run", side_effect=[check_fail, add_fail]):
+        result = _check_bot_collaborator(config)
+
+    assert result.status == "fail"
+    assert result.remediation is not None
+
+
+def test_check_bot_collaborator_fail_when_token_missing_after_add(tmp_path: Path) -> None:
+    """Returns fail if add succeeds but BRIMSTONE_GH_TOKEN is absent."""
+    config = make_config(tmp_path, github_repo="owner/repo")
+    check_fail = _subprocess_result(returncode=1)
+    add_ok = _subprocess_result(returncode=0)
+    env = {k: v for k, v in os.environ.items() if k != "BRIMSTONE_GH_TOKEN"}
+
+    with (
+        patch("subprocess.run", side_effect=[check_fail, add_ok]),
+        patch.dict("os.environ", env, clear=True),
+    ):
+        result = _check_bot_collaborator(config)
+
+    assert result.status == "fail"
+    assert result.remediation is not None
 
 
 # ---------------------------------------------------------------------------
@@ -427,26 +549,24 @@ def test_check_worktrees_pass_no_claude_worktrees() -> None:
     assert result.status == "pass"
 
 
-def test_check_worktrees_warn_with_stale_worktrees(tmp_path: Path) -> None:
-    """Returns warn when worktrees exist under .claude/worktrees/."""
+def test_check_worktrees_auto_removes_stale(tmp_path: Path) -> None:
+    """Stale worktrees are removed automatically and the check returns pass."""
     worktree_path = tmp_path / ".claude" / "worktrees" / "10-feat-config"
     worktree_path.mkdir(parents=True)
     porcelain = (
         "worktree /home/user/repo\nHEAD abc\nbranch refs/heads/main\n\n"
         f"worktree {worktree_path}\nHEAD def\nbranch refs/heads/10-feat-config\n"
     )
-    with patch(
-        "subprocess.run",
-        return_value=_subprocess_result(returncode=0, stdout=porcelain),
-    ):
+    list_ok = _subprocess_result(returncode=0, stdout=porcelain)
+    remove_ok = _subprocess_result(returncode=0, stdout="")
+    with patch("subprocess.run", side_effect=[list_ok, remove_ok]):
         result = _check_worktrees()
-    assert result.status == "warn"
-    assert "1 worktree(s)" in result.message
-    assert result.remediation is not None
+    assert result.status == "pass"
+    assert "Removed 1" in result.message
 
 
-def test_check_worktrees_warn_count_in_message(tmp_path: Path) -> None:
-    """Warn message includes correct worktree count."""
+def test_check_worktrees_warn_when_removal_fails(tmp_path: Path) -> None:
+    """Warn with remediation instructions when auto-removal fails."""
     wt1 = tmp_path / ".claude" / "worktrees" / "10-feat"
     wt2 = tmp_path / ".claude" / "worktrees" / "20-fix"
     wt1.mkdir(parents=True)
@@ -456,13 +576,13 @@ def test_check_worktrees_warn_count_in_message(tmp_path: Path) -> None:
         f"worktree {wt1}\nHEAD def\n\n"
         f"worktree {wt2}\nHEAD ghi\n"
     )
-    with patch(
-        "subprocess.run",
-        return_value=_subprocess_result(returncode=0, stdout=porcelain),
-    ):
+    list_ok = _subprocess_result(returncode=0, stdout=porcelain)
+    remove_fail = _subprocess_result(returncode=1, stdout="", stderr="locked")
+    with patch("subprocess.run", side_effect=[list_ok, remove_fail, remove_fail]):
         result = _check_worktrees()
     assert result.status == "warn"
-    assert "2 worktree(s)" in result.message
+    assert "failed to remove 2" in result.message
+    assert result.remediation is not None
 
 
 # ---------------------------------------------------------------------------

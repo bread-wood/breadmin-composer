@@ -21,7 +21,7 @@ Requires Python 3.11+ and the following tools on `$PATH`:
 ## Pipeline
 
 ```
-spec → init → research → design → scoping → implementation → qa → release
+spec → init → plan → research → design → scoping → implementation → qa → release
 ```
 
 No stage may be skipped. Each stage is triggered via `brimstone run --<stage>`.
@@ -30,11 +30,45 @@ See `CLAUDE.md` for the full orchestration protocol.
 ## Commands
 
 ```
+brimstone init    Create a GitHub repo and set it up for the pipeline
 brimstone run     Run one or more pipeline stages for a milestone
-brimstone init    Upload spec + create milestone + seed research issues
 brimstone health  Preflight checks (credentials, repo state, active worktrees)
 brimstone cost    Cost ledger summary
 brimstone adopt   Adopt an existing repo (not yet implemented)
+```
+
+### `brimstone init`
+
+Creates the GitHub repo (if it does not already exist), clones it locally, adds
+`yeast-bot` as a collaborator, installs the CI workflow, creates issue labels, and
+sets branch protection.
+
+```bash
+brimstone init OWNER/REPO
+brimstone init OWNER/REPO --dry-run
+```
+
+Run once per new repository, then use `brimstone run --plan` to seed research issues.
+
+### `brimstone run --plan`
+
+Seeds a spec into the repo and decomposes it into `stage/research` GitHub issues.
+The milestone name is inferred from the spec filename stem.
+
+```bash
+# Single milestone — milestone inferred from filename (v0.1.0-cold-start)
+brimstone run --plan --repo OWNER/REPO \
+              --spec /path/to/v0.1.0-cold-start.md
+
+# Multiple milestones in one invocation
+brimstone run --plan --repo OWNER/REPO \
+              --spec /path/to/v0.1.0.md \
+              --spec /path/to/v0.2.0.md \
+              --spec /path/to/v0.3.0.md
+
+# Explicit milestone name (overrides stem inference)
+brimstone run --plan --repo OWNER/REPO \
+              --spec /path/to/spec.md --milestone v0.1.0-cold-start
 ```
 
 ### `brimstone run`
@@ -49,22 +83,11 @@ brimstone run --design --repo OWNER/REPO --milestone "v0.1.0-cold-start"
 # Implementation stage
 brimstone run --impl --repo OWNER/REPO --milestone "v0.1.0-cold-start"
 
-# All stages in order
+# All stages in order (research → design → impl)
 brimstone run --all --repo OWNER/REPO --milestone "v0.1.0-cold-start"
 ```
 
 Common flags: `--dry-run`, `--model <model-id>`, `--max-budget <usd>`.
-
-### `brimstone init`
-
-```bash
-brimstone init --repo OWNER/REPO \
-               --spec docs/specs/v0.1.x-cold-start.md \
-               --milestone "v0.1.0-cold-start"
-```
-
-Uploads the spec to `docs/specs/<spec-stem>.md` in the target repo, creates the
-GitHub milestone with the given name, and seeds the first batch of `stage/research` issues.
 
 ### `--repo` resolution
 
@@ -73,7 +96,6 @@ GitHub milestone with the given name, and seeds the first batch of `stage/resear
 | *(no flag)* | Operates on the current working directory. Fails if cwd is not a git repo. |
 | `--repo owner/name` | Clones the remote repo to a temp dir and operates on it. |
 | `--repo path/to/local/dir` | Operates on the local directory. Fails if not a git repo. |
-| `--repo name` | Scaffolds a new private GitHub repo named `name`, then operates on it. |
 
 ## Module Listing
 
@@ -89,7 +111,7 @@ src/brimstone/
     ├── impl-worker.md      ← Bundled system prompt for the implementation stage
     ├── research-worker.md  ← Bundled system prompt for the research stage
     ├── design-worker.md    ← Bundled system prompt for the design stage
-    └── plan-milestones.md  ← Bundled system prompt for brimstone init
+    └── plan-milestones.md  ← Bundled system prompt for brimstone run --plan
 ```
 
 ## Key Types
@@ -112,7 +134,7 @@ Set environment variables or create a `.env` file in the working directory:
 | `BRIMSTONE_MAX_BUDGET_USD` | No | `5.00` | USD budget cap per session |
 | `BRIMSTONE_MAX_CONCURRENCY` | No | `5` | Max parallel sub-agents |
 | `BRIMSTONE_AGENT_TIMEOUT_MINUTES` | No | `30` | Timeout per sub-agent |
-| `BRIMSTONE_DEFAULT_BRANCH` | No | `main` | Default branch name of the target repo |
+| `BRIMSTONE_DEFAULT_BRANCH` | No | — | Enforce a specific default branch name |
 | `BRIMSTONE_LOG_DIR` | No | `~/.brimstone/logs` | Session logs and cost ledger |
 | `BRIMSTONE_CHECKPOINT_DIR` | No | `~/.brimstone/checkpoints` | Session checkpoints |
 

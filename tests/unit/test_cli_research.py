@@ -22,7 +22,6 @@ from brimstone.cli import (
     _apply_triage_rubric,
     _classify_blocking_issues,
     _filter_unblocked,
-    _find_next_milestone,
     _list_open_research_issues,
     _list_triage_issues,
     _parse_dependencies,
@@ -367,7 +366,10 @@ class TestScoreTriageIssue:
 
         result_text = "Q1: YES\nQ2: YES\nQ3: YES\nSCORE: 3\n"
         with (
-            patch("brimstone.cli.runner.run", return_value=make_run_result(result_text=result_text)),
+            patch(
+                "brimstone.cli.runner.run",
+                return_value=make_run_result(result_text=result_text),
+            ),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
         ):
             score = _score_triage_issue(issue, "owner/repo", "MVP Research", config, checkpoint)
@@ -381,7 +383,10 @@ class TestScoreTriageIssue:
 
         result_text = "Q1: NO\nQ2: NO\nQ3: NO\nSCORE: 0\n"
         with (
-            patch("brimstone.cli.runner.run", return_value=make_run_result(result_text=result_text)),
+            patch(
+                "brimstone.cli.runner.run",
+                return_value=make_run_result(result_text=result_text),
+            ),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
         ):
             score = _score_triage_issue(issue, "owner/repo", "MVP Research", config, checkpoint)
@@ -592,98 +597,11 @@ class TestClassifyBlockingIssues:
 
 
 # ---------------------------------------------------------------------------
-# _find_next_milestone
-# ---------------------------------------------------------------------------
-
-
-class TestFindNextMilestone:
-    def test_finds_next_milestone_by_number(self) -> None:
-        milestones = [
-            {"title": "v1", "number": 1, "state": "open"},
-            {"title": "v2", "number": 2, "state": "open"},
-            {"title": "v3", "number": 3, "state": "open"},
-        ]
-        gh_out = make_gh_result(stdout=json.dumps(milestones))
-        with patch("brimstone.cli.subprocess.run", return_value=gh_out):
-            result = _find_next_milestone("owner/repo", "v1")
-        assert result == "v2"
-
-    def test_returns_none_if_no_next_milestone(self) -> None:
-        milestones = [
-            {"title": "v1", "number": 1, "state": "open"},
-        ]
-        gh_out = make_gh_result(stdout=json.dumps(milestones))
-        with patch("brimstone.cli.subprocess.run", return_value=gh_out):
-            result = _find_next_milestone("owner/repo", "v1")
-        assert result is None
-
-    def test_returns_none_on_gh_failure(self) -> None:
-        with patch("brimstone.cli.subprocess.run", return_value=make_gh_result(returncode=1)):
-            result = _find_next_milestone("owner/repo", "v1")
-        assert result is None
-
-
-# ---------------------------------------------------------------------------
 # _run_completion_gate
 # ---------------------------------------------------------------------------
 
 
 class TestRunCompletionGate:
-    def test_migrates_non_blocking_issues(self, tmp_path: Path) -> None:
-        """Non-blocking issues are migrated to the next research milestone."""
-        config = make_config()
-        object.__setattr__(config, "checkpoint_dir", tmp_path)
-        object.__setattr__(config, "log_dir", tmp_path / "logs")
-        checkpoint = make_checkpoint()
-        non_blocking = [make_issue(5), make_issue(6)]
-
-        with (
-            patch("brimstone.cli._find_next_milestone", return_value="v2"),
-            patch("brimstone.cli._migrate_issue_to_milestone") as mock_migrate,
-            patch("brimstone.cli._file_pipeline_issue"),
-            patch("brimstone.cli.logger.log_conductor_event"),
-            patch("brimstone.cli.session.save"),
-        ):
-            _run_completion_gate(
-                repo="owner/repo",
-                milestone="v1",
-                open_issues=non_blocking,
-                config=config,
-                checkpoint=checkpoint,
-            )
-
-        assert mock_migrate.call_count == 2
-        mock_migrate.assert_any_call(repo="owner/repo", issue_number=5, milestone="v2")
-        mock_migrate.assert_any_call(repo="owner/repo", issue_number=6, milestone="v2")
-
-    def test_files_pipeline_issue(self, tmp_path: Path) -> None:
-        """A 'Run design-worker for <milestone>' pipeline issue is created."""
-        config = make_config()
-        object.__setattr__(config, "checkpoint_dir", tmp_path)
-        object.__setattr__(config, "log_dir", tmp_path / "logs")
-        checkpoint = make_checkpoint()
-
-        with (
-            patch("brimstone.cli._find_next_milestone", return_value="v2"),
-            patch("brimstone.cli._migrate_issue_to_milestone"),
-            patch("brimstone.cli._file_pipeline_issue") as mock_file,
-            patch("brimstone.cli.logger.log_conductor_event"),
-            patch("brimstone.cli.session.save"),
-        ):
-            _run_completion_gate(
-                repo="owner/repo",
-                milestone="v1",
-                open_issues=[],
-                config=config,
-                checkpoint=checkpoint,
-            )
-
-        mock_file.assert_called_once_with(
-            repo="owner/repo",
-            next_worker="design-worker",
-            milestone="v1",
-        )
-
     def test_logs_stage_complete(self, tmp_path: Path) -> None:
         """stage_complete event is logged."""
         config = make_config()
@@ -692,9 +610,7 @@ class TestRunCompletionGate:
         checkpoint = make_checkpoint()
 
         with (
-            patch("brimstone.cli._find_next_milestone", return_value=None),
-            patch("brimstone.cli._migrate_issue_to_milestone"),
-            patch("brimstone.cli._file_pipeline_issue"),
+            patch("brimstone.cli._file_design_issue_if_missing"),
             patch("brimstone.cli.logger.log_conductor_event") as mock_log,
             patch("brimstone.cli.session.save"),
         ):
@@ -709,7 +625,60 @@ class TestRunCompletionGate:
         logged_types = [c.kwargs.get("event_type") or c.args[2] for c in mock_log.call_args_list]
         assert "stage_complete" in logged_types
 
-    def test_dry_run_does_not_call_gh(self, tmp_path: Path) -> None:
+    def test_files_hld_design_issue(self, tmp_path: Path) -> None:
+        """HLD design issue is created on completion."""
+        config = make_config()
+        object.__setattr__(config, "checkpoint_dir", tmp_path)
+        object.__setattr__(config, "log_dir", tmp_path / "logs")
+        checkpoint = make_checkpoint()
+
+        with (
+            patch("brimstone.cli._file_design_issue_if_missing") as mock_hld,
+            patch("brimstone.cli.logger.log_conductor_event"),
+            patch("brimstone.cli.session.save"),
+        ):
+            _run_completion_gate(
+                repo="owner/repo",
+                milestone="v1",
+                open_issues=[],
+                config=config,
+                checkpoint=checkpoint,
+            )
+
+        mock_hld.assert_called_once()
+        assert mock_hld.call_args.kwargs.get("milestone") == "v1"
+
+    def test_non_blocking_issues_left_in_place(self, tmp_path: Path) -> None:
+        """Non-blocking open issues are not migrated anywhere."""
+        config = make_config()
+        object.__setattr__(config, "checkpoint_dir", tmp_path)
+        object.__setattr__(config, "log_dir", tmp_path / "logs")
+        checkpoint = make_checkpoint()
+        non_blocking = [make_issue(5), make_issue(6)]
+
+        with (
+            patch("brimstone.cli._file_design_issue_if_missing"),
+            patch("brimstone.cli.logger.log_conductor_event"),
+            patch("brimstone.cli.session.save"),
+            patch("brimstone.cli.subprocess.run") as mock_subprocess,
+        ):
+            _run_completion_gate(
+                repo="owner/repo",
+                milestone="v1",
+                open_issues=non_blocking,
+                config=config,
+                checkpoint=checkpoint,
+            )
+
+        # No gh issue edit calls to move issues to another milestone
+        gh_calls = [
+            c
+            for c in mock_subprocess.call_args_list
+            if c.args and "issue" in c.args[0] and "edit" in c.args[0]
+        ]
+        assert not gh_calls
+
+    def test_dry_run_does_not_file_hld(self, tmp_path: Path) -> None:
         """In dry_run mode, no real GitHub calls are made."""
         config = make_config()
         object.__setattr__(config, "checkpoint_dir", tmp_path)
@@ -717,9 +686,7 @@ class TestRunCompletionGate:
         checkpoint = make_checkpoint()
 
         with (
-            patch("brimstone.cli._find_next_milestone", return_value="v2"),
-            patch("brimstone.cli._migrate_issue_to_milestone") as mock_migrate,
-            patch("brimstone.cli._file_pipeline_issue") as mock_file,
+            patch("brimstone.cli._file_design_issue_if_missing") as mock_hld,
             patch("brimstone.cli.logger.log_conductor_event"),
             patch("brimstone.cli.session.save"),
             patch("brimstone.cli.click.echo"),
@@ -733,8 +700,7 @@ class TestRunCompletionGate:
                 dry_run=True,
             )
 
-        mock_migrate.assert_not_called()
-        mock_file.assert_not_called()
+        mock_hld.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -880,7 +846,11 @@ class TestRunResearchWorkerIssueSelection:
             patch("brimstone.cli._filter_unblocked", return_value=[blocking_issue]),
             patch("brimstone.cli._sort_issues", return_value=[blocking_issue]),
             patch("brimstone.cli._claim_issue"),
+            patch("brimstone.cli._create_worktree", return_value="/tmp/fake-worktree"),
+            patch("brimstone.cli._remove_worktree"),
             patch("brimstone.cli.runner.run", return_value=success_result),
+            patch("brimstone.cli._find_pr_for_issue", return_value=(99, "1-test-issue")),
+            patch("brimstone.cli._monitor_pr", return_value=True),
             patch("brimstone.cli._apply_triage_rubric") as mock_triage,
             patch("brimstone.cli._run_completion_gate"),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
@@ -997,6 +967,8 @@ class TestRunResearchWorkerRateLimit:
             patch("brimstone.cli._sort_issues", return_value=[blocking_issue]),
             patch("brimstone.cli._claim_issue"),
             patch("brimstone.cli._unclaim_issue"),
+            patch("brimstone.cli._create_worktree", return_value="/tmp/fake-worktree"),
+            patch("brimstone.cli._remove_worktree"),
             patch("brimstone.cli.runner.run", return_value=rate_limited_result),
             patch("brimstone.cli._run_completion_gate"),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
@@ -1052,6 +1024,8 @@ class TestRunResearchWorkerRateLimit:
             patch("brimstone.cli._sort_issues", return_value=[blocking_issue]),
             patch("brimstone.cli._claim_issue"),
             patch("brimstone.cli._unclaim_issue"),
+            patch("brimstone.cli._create_worktree", return_value="/tmp/fake-worktree"),
+            patch("brimstone.cli._remove_worktree"),
             patch("brimstone.cli.runner.run", return_value=budget_result),
             patch("brimstone.cli._run_completion_gate"),
             patch("brimstone.cli.build_subprocess_env", return_value={}),
@@ -1116,6 +1090,8 @@ class TestRunResearchWorkerErrorHandling:
             patch("brimstone.cli._sort_issues", return_value=[blocking_issue]),
             patch("brimstone.cli._claim_issue"),
             patch("brimstone.cli._unclaim_issue"),
+            patch("brimstone.cli._create_worktree", return_value="/tmp/fake-worktree"),
+            patch("brimstone.cli._remove_worktree"),
             patch("brimstone.cli.runner.run", return_value=error_result),
             patch("brimstone.cli._run_completion_gate"),
             patch("brimstone.cli.build_subprocess_env", return_value={}),

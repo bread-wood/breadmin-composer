@@ -120,7 +120,6 @@ _DESIGN_PATCHES = {
     "dispatch_agent": "brimstone.cli._dispatch_design_agent",
     "find_pr": "brimstone.cli._find_pr_for_branch",
     "monitor_pr": "brimstone.cli._monitor_pr",
-    "file_pipeline": "brimstone.cli._file_pipeline_issue",
     "log_event": "brimstone.cli.logger.log_conductor_event",
     "save_session": "brimstone.cli.session.save",
     "slugify": "brimstone.cli._slugify",
@@ -167,7 +166,6 @@ class TestDesignWorkerGate1:
             patch(_DESIGN_PATCHES["list_design"], return_value=[]),
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
-            patch(_DESIGN_PATCHES["file_pipeline"]),
         ):
             # No LLD issues → SystemExit(1), but Gate 1 passed
             with pytest.raises(SystemExit) as exc_info:
@@ -243,7 +241,6 @@ class TestDesignWorkerPhase1:
             patch(_DESIGN_PATCHES["remove_wt"]),
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
-            patch(_DESIGN_PATCHES["file_pipeline"]),
             patch(_DESIGN_PATCHES["slugify"], return_value="design-lld-parser"),
         ):
             mock_dispatch.return_value = make_run_result()
@@ -295,7 +292,6 @@ class TestDesignWorkerPhase1:
             patch(_DESIGN_PATCHES["dispatch_agent"], return_value=make_run_result()) as mock_da,
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
-            patch(_DESIGN_PATCHES["file_pipeline"]),
             patch(_DESIGN_PATCHES["slugify"], return_value="design-hld-v1"),
             # Patch _list_open_design_issues to return hld_issue on first call
             patch(
@@ -435,7 +431,6 @@ class TestDesignWorkerPhase2:
             patch(_DESIGN_PATCHES["find_pr"], return_value=5),
             patch(_DESIGN_PATCHES["monitor_pr"], return_value=True),
             patch(_DESIGN_PATCHES["remove_wt"]),
-            patch(_DESIGN_PATCHES["file_pipeline"]),
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
             patch(_DESIGN_PATCHES["slugify"], return_value="some-slug"),
@@ -482,7 +477,6 @@ class TestDesignWorkerPhase2:
             patch(_DESIGN_PATCHES["find_pr"], return_value=5),
             patch(_DESIGN_PATCHES["monitor_pr"], return_value=True),
             patch(_DESIGN_PATCHES["remove_wt"]),
-            patch(_DESIGN_PATCHES["file_pipeline"]),
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
             patch(_DESIGN_PATCHES["slugify"], return_value="slug"),
@@ -550,7 +544,6 @@ class TestDesignWorkerPhase2:
             patch(_DESIGN_PATCHES["find_pr"], return_value=5),
             patch(_DESIGN_PATCHES["monitor_pr"], return_value=True),
             patch(_DESIGN_PATCHES["remove_wt"]),
-            patch(_DESIGN_PATCHES["file_pipeline"]),
             patch(_DESIGN_PATCHES["log_event"], side_effect=record_event),
             patch(_DESIGN_PATCHES["save_session"]),
             patch(_DESIGN_PATCHES["slugify"], return_value="slug"),

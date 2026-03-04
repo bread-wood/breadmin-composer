@@ -181,20 +181,37 @@ Launch sub-agents in parallel using `Agent(isolation: "worktree")`.
 >    git commit -m "docs: add <topic> research (Closes #<N>) [skip ci]"
 >    ```
 > 9. Push: `git push -u origin <Branch>`
-> 10. STOP. Do NOT create a PR. The orchestrator merges the branch directly.
+> 10. Create PR:
+>    ```bash
+>    gh pr create --repo <owner>/<repo> \
+>      --title "docs: <topic> research (#<N>)" \
+>      --label "stage/research" \
+>      --body "Closes #<N>
+>
+>    ## Summary
+>    <1-3 sentences describing findings>
+>
+>    ## Follow-up issues spawned
+>    <list issue numbers or 'none'>
+>    "
+>    ```
+> 11. Wait for CI: `gh pr checks <PR-number> --watch`
+> 12. Read all CI and review feedback: `gh pr view <PR-number> --json reviews,comments`
+>     and inline comments: `gh api repos/<owner>/<repo>/pulls/<PR-number>/comments`
+> 13. Triage each piece of feedback:
+>     - **Fix now**: in scope and straightforward — fix, push, re-check CI
+>     - **File issue**: valid but out of scope — `gh issue create` and note in PR comment
+>     - **Skip**: false positive — note why in PR comment
+> 14. STOP. Do not merge.
 
 ### Step 3 — Merge & Requeue
 
 As **each agent completes** (do not wait for the entire batch):
 
 1. **Clean up** its worktree: `git worktree remove --force <path>`
-2. **Merge the branch directly** (no PR): the brimstone orchestrator does this automatically via the GitHub API. If running this skill manually, merge with:
-   ```bash
-   gh api repos/{owner}/{repo}/merges --method POST \
-     -f base=$DEFAULT_BRANCH -f head=<branch-name> \
-     -f commit_message="docs: merge <branch-name>"
-   gh api repos/{owner}/{repo}/git/refs/heads/<branch-name> --method DELETE
-   ```
+2. **Find the PR** the agent created: `gh pr list --repo <owner>/<repo> --head <branch> --state open --json number`
+   - The brimstone orchestrator monitors and squash-merges it automatically via `gh pr merge --squash`.
+   - If running this skill manually: wait for CI (`gh pr checks <PR> --watch`), then `gh pr merge <PR> --squash --delete-branch`
 3. **Pull**: `git pull origin $DEFAULT_BRANCH`
 4. **Verify follow-ups were created**: read the research doc's "Follow-Up Issues Spawned" section
    - If the agent created follow-ups, apply the **triage rubric** to each one immediately:
@@ -208,7 +225,7 @@ As **each agent completes** (do not wait for the entire batch):
      - **Score < 2**: `gh issue close <N> --reason "not planned" --comment "score X/3"` + add `wont-research`
      - **Score ≥ 2**: `gh issue edit <N> --remove-label triage` (keep, leave in queue)
    - If the agent created zero follow-ups, read the doc's "Follow-Up Recommendations" section yourself and decide if any warrant issues — if so, create them with `triage` label and score them
-5. **Comment on the closed parent issue**: `gh issue comment <N> --body "Research doc merged in PR #<PR>. Follow-up issues: <list or 'none'>"`
+5. **Comment on the closed parent issue**: `gh issue comment <N> --repo <owner>/<repo> --body "Research doc merged in PR #<PR>. Follow-up issues: <list or 'none'>"`
 6. **Re-survey**: check for newly unblocked issues in the active milestone
 7. **Dispatch next batch** (up to 5 agents total active)
 8. **Continue** until active milestone queue is empty AND all agents complete
