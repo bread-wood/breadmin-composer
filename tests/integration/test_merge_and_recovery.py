@@ -122,9 +122,7 @@ def _make_work_bead(
 class TestMonitorPrToMergeQueueDrain:
     """_monitor_pr enqueues; _process_merge_queue drains and updates beads."""
 
-    def test_happy_path_bead_states_after_drain(
-        self, git_repo: Path, tmp_path: Path
-    ) -> None:
+    def test_happy_path_bead_states_after_drain(self, git_repo: Path, tmp_path: Path) -> None:
         """Full happy path: CI passes → enqueued → squash-merged → beads closed.
 
         _monitor_pr writes a PRBead and enqueues a MergeQueueEntry.
@@ -213,9 +211,7 @@ class TestMonitorPrToMergeQueueDrain:
             f"WorkBead.state must be 'closed', got {work_bead_after.state!r}"
         )
 
-    def test_merge_failure_leaves_pr_bead_unchanged(
-        self, git_repo: Path, tmp_path: Path
-    ) -> None:
+    def test_merge_failure_leaves_pr_bead_unchanged(self, git_repo: Path, tmp_path: Path) -> None:
         """If squash-merge fails, PRBead state is not updated and queue is cleared."""
         os.chdir(git_repo)
         config = make_config(tmp_path)
