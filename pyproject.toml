@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-brimstone        = "brimstone.cli:composer"
+brimstone        = "brimstone.cli:brimstone"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/brimstone"]

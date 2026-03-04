@@ -32,6 +32,7 @@ import click
 from brimstone import health, logger, runner, session
 from brimstone.beads import (
     BeadStore,
+    CampaignBead,
     MergeQueueEntry,
     PRBead,
     WorkBead,
@@ -1237,7 +1238,7 @@ def _unclaim_issue(repo: str, issue_number: int, store: BeadStore | None = None)
     """
     if store is not None:
         bead = store.read_work_bead(issue_number)
-        if bead is not None:
+        if bead is not None and bead.state not in ("abandoned", "closed"):
             bead.state = "open"
             store.write_work_bead(bead)
     info = _gh(
@@ -4931,11 +4932,15 @@ def _run_plan(
 
 
 @click.group()
-def composer() -> None:
-    """Composer orchestrator — run pipeline workers and admin commands."""
+def brimstone() -> None:
+    """Brimstone orchestrator — run pipeline workers and admin commands."""
 
 
-@composer.command("health")
+# Keep the old name as an alias for backwards compatibility
+composer = brimstone
+
+
+@brimstone.command("health")
 @click.option(
     "--repo",
     default=None,
@@ -4967,7 +4972,7 @@ def health_cmd(repo: str | None, as_json: bool) -> None:
     raise SystemExit(0 if not report.fatal else 1)
 
 
-@composer.command("cost")
+@brimstone.command("cost")
 def cost() -> None:
     """Show cost ledger summary."""
     config = load_config()
@@ -5034,7 +5039,8 @@ def _check_gate_before_stage(
             )
 
 
-@composer.command("run")
+@brimstone.command("run")
+@click.argument("specs", nargs=-1, type=click.Path(dir_okay=False), metavar="[SPEC]...")
 @click.option(
     "--repo",
     default=None,
@@ -5044,54 +5050,77 @@ def _check_gate_before_stage(
     ),
 )
 @click.option(
+    "--stage",
+    "stage_flag",
+    default=None,
+    type=click.Choice(["plan", "research", "design", "scope", "impl", "all"]),
+    help=(
+        "Pipeline stage to run. One of: plan, research, design, scope, impl, all. "
+        "When positional SPEC args are given and --stage is omitted, defaults to 'all'."
+    ),
+)
+@click.option(
     "--plan",
     "do_plan",
     is_flag=True,
-    help="Run the plan-milestones stage (seeds research issues from spec)",
+    help="[Deprecated] Run the plan-milestones stage. Use --stage plan instead.",
 )
-@click.option("--research", "do_research", is_flag=True, help="Run the research stage")
-@click.option("--design", "do_design", is_flag=True, help="Run the design stage")
+@click.option(
+    "--research",
+    "do_research",
+    is_flag=True,
+    help="[Deprecated] Run the research stage. Use --stage research instead.",
+)
+@click.option(
+    "--design",
+    "do_design",
+    is_flag=True,
+    help="[Deprecated] Run the design stage. Use --stage design instead.",
+)
 @click.option(
     "--scope",
     "do_scope",
     is_flag=True,
-    help="Run the scoping stage (reads HLD + LLDs, files impl issues)",
+    help="[Deprecated] Run the scoping stage. Use --stage scope instead.",
 )
-@click.option("--impl", "do_impl", is_flag=True, help="Run the implementation stage")
+@click.option(
+    "--impl",
+    "do_impl",
+    is_flag=True,
+    help="[Deprecated] Run the implementation stage. Use --stage impl instead.",
+)
 @click.option(
     "--all",
     "do_all",
     is_flag=True,
-    help=(
-        "Run all pipeline stages in order. "
-        "With --spec: plan → research → design → scope → impl. "
-        "Without --spec: research → design → scope → impl."
-    ),
+    help="[Deprecated] Run all pipeline stages in order. Use --stage all instead.",
 )
 @click.option(
     "--milestone",
     multiple=True,
     help=(
         "Milestone name to operate on. Repeat to run multiple milestones in sequence. "
-        "Required for --research / --design / --impl. "
-        "Optional for --plan (inferred from spec filename) and for --all with --spec "
-        "(milestones inferred from spec filenames when omitted)."
+        "Required when no positional SPEC args are given. "
+        "Optional when SPEC args are provided (milestones inferred from spec filenames)."
     ),
 )
 @click.option(
     "--spec",
+    "spec_opt",
     multiple=True,
     type=click.Path(dir_okay=False),
     help=(
-        "Path to a spec .md file. Repeat to plan multiple milestones in one invocation. "
-        "Required when --plan is specified."
+        "Path to a spec .md file (option form). Equivalent to positional SPEC args. "
+        "Repeat to plan multiple milestones in one invocation."
     ),
 )
 @click.option("--model", default=None, help="Override Claude model")
 @click.option("--max-budget", type=float, default=None, help="USD budget cap")
 @click.option("--dry-run", is_flag=True, help="Print what each stage would do without executing")
 def run(
+    specs: tuple[str, ...],
     repo: str | None,
+    stage_flag: str | None,
     do_plan: bool,
     do_research: bool,
     do_design: bool,
@@ -5099,7 +5128,7 @@ def run(
     do_impl: bool,
     do_all: bool,
     milestone: tuple[str, ...],
-    spec: tuple[str, ...],
+    spec_opt: tuple[str, ...],
     model: str | None,
     max_budget: float | None,
     dry_run: bool,
@@ -5110,22 +5139,52 @@ def run(
     Prerequisites are checked before each stage unless the prerequisite is
     also being run in the same invocation.
 
+    SPEC is an optional positional argument: path to a spec .md file. When
+    provided, the milestone is inferred from the filename stem (e.g.
+    v0.2.0-feature.md → v0.2.0). Multiple SPECs run a campaign: each
+    milestone completes fully before the next begins.
+
     Examples:
 
-      brimstone run --plan --repo owner/repo --spec ./v0.1.0.md
+      brimstone run --stage plan --repo owner/repo /path/to/v0.1.0.md
 
-      brimstone run --plan --repo owner/repo --spec v0.1.0.md --spec v0.2.0.md
+      brimstone run /path/to/v0.2.0.md /path/to/v0.3.0.md --repo owner/repo
 
-      brimstone run --research --milestone "v0.1.0"
+      brimstone run --stage research --milestone "v0.1.0"
 
-      brimstone run --design --scope --milestone "v0.1.0"
+      brimstone run --stage impl --repo owner/repo --milestone v0.2.0
 
-      brimstone run --scope --impl --milestone "v0.1.0"
-
-      brimstone run --all --milestone "v0.1.0" --dry-run
+      brimstone run --stage all --milestone "v0.1.0" --dry-run
 
       brimstone run --all --spec v0.3.0.md --spec v0.4.0.md --repo owner/repo
     """
+    # -----------------------------------------------------------------------
+    # Merge positional specs and --spec option into a single tuple
+    # -----------------------------------------------------------------------
+    spec: tuple[str, ...] = specs + spec_opt
+
+    # -----------------------------------------------------------------------
+    # Resolve --stage (primary) vs legacy flags (deprecated aliases)
+    # --stage wins if both are provided.
+    # -----------------------------------------------------------------------
+    if stage_flag is not None:
+        # --stage is the primary interface
+        effective_stage = stage_flag
+        # Map to legacy booleans for the stages-list logic below
+        do_all = effective_stage == "all"
+        do_plan = effective_stage == "plan"
+        do_research = effective_stage == "research"
+        do_design = effective_stage == "design"
+        do_scope = effective_stage == "scope"
+        do_impl = effective_stage == "impl"
+    else:
+        # No --stage given — check if legacy flags were used
+        if not any([do_plan, do_research, do_design, do_scope, do_impl, do_all]):
+            # No flags at all: if spec provided, default to "all"
+            if spec:
+                do_all = True
+            # else: fall through to the "no stages" error below
+
     # -----------------------------------------------------------------------
     # Determine ordered stages to run
     # -----------------------------------------------------------------------
@@ -5148,24 +5207,43 @@ def run(
 
     if not stages:
         raise click.UsageError(
-            "Specify at least one stage: --plan, --research, --design, --scope, --impl, or --all"
+            "Specify a stage: --stage <plan|research|design|scope|impl|all>, "
+            "or pass a SPEC file to run the full pipeline."
         )
 
     # --spec is required when --plan is in the stage list
     if "plan" in stages and not spec:
-        raise click.UsageError("--spec is required when --plan is specified")
+        raise click.UsageError(
+            "--spec (or a positional SPEC arg) is required when --plan is specified"
+        )
 
     # Resolve spec paths eagerly so errors surface before any network calls
     resolved_specs = [_validate_spec_path(s) for s in spec]
 
+    # Infer milestone from spec stem: take everything up to and including the
+    # first component that starts with 'v' and looks like a version.
+    def _infer_milestone_from_spec(path: Path) -> str:
+        stem = path.stem
+        parts = stem.split("-")
+        version_parts: list[str] = []
+        for part in parts:
+            version_parts.append(part)
+            if re.match(r"^v\d+(\.\d+)*$", part):
+                break
+        return "-".join(version_parts) if version_parts else stem
+
     # Determine the effective milestone list for non-plan stages.
-    # When --all is used with --spec and no explicit --milestone, infer from spec stems.
+    # When --all (or spec with no flags) is used with specs and no explicit
+    # --milestone, infer from spec stems.
     non_plan_stages = [s for s in stages if s != "plan"]
     if non_plan_stages:
         if milestone:
             effective_milestones: tuple[str, ...] = milestone
-        elif resolved_specs and do_all:
-            effective_milestones = tuple(p.stem for p in resolved_specs)
+        elif resolved_specs and ("plan" in stages or do_all or stage_flag in (None, "all")):
+            effective_milestones = tuple(_infer_milestone_from_spec(p) for p in resolved_specs)
+        elif resolved_specs:
+            # Single-stage run with spec args — infer milestone from stem
+            effective_milestones = tuple(_infer_milestone_from_spec(p) for p in resolved_specs)
         else:
             raise click.UsageError(
                 f"--milestone is required for: {', '.join(f'--{s}' for s in non_plan_stages)}"
@@ -5211,6 +5289,29 @@ def run(
         _ensure_labels(repo_ref)
 
     # -----------------------------------------------------------------------
+    # Campaign bead — track multi-milestone progress
+    # -----------------------------------------------------------------------
+    is_campaign = len(effective_milestones) > 1
+    campaign_store: BeadStore | None = None
+
+    if is_campaign and not dry_run and repo_ref:
+        campaign_store = make_bead_store(config, repo_ref)
+        existing = campaign_store.read_campaign_bead()
+        if existing is None:
+            now_str = datetime.now(UTC).isoformat()
+            campaign_bead = CampaignBead(
+                v=1,
+                repo=repo_ref,
+                milestones=list(effective_milestones),
+                current_index=0,
+                statuses={ms: "pending" for ms in effective_milestones},
+                updated_at=now_str,
+            )
+            campaign_store.write_campaign_bead(campaign_bead)
+        else:
+            campaign_bead = existing
+
+    # -----------------------------------------------------------------------
     # Execute milestone-first: complete each milestone fully before starting
     # the next. This ensures implementation decisions from vN inform vN+1
     # research and planning.
@@ -5220,9 +5321,25 @@ def run(
     # -----------------------------------------------------------------------
     _plan_skip = frozenset({"yeast-bot is repo collaborator"})
 
+    _STAGE_STATUS_MAP = {
+        "plan": "planning",
+        "research": "researching",
+        "design": "designing",
+        "scope": "scoping",
+        "impl": "implementing",
+    }
+
     for i, ms in enumerate(effective_milestones):
         for stage in stages:
             click.echo(f"\n── Stage: {stage} ({ms}) ──", err=True)
+
+            # Update campaign bead status
+            if is_campaign and not dry_run and campaign_store is not None:
+                status_name = _STAGE_STATUS_MAP.get(stage, stage)
+                campaign_bead.statuses[ms] = status_name
+                campaign_bead.current_index = i
+                campaign_bead.updated_at = datetime.now(UTC).isoformat()
+                campaign_store.write_campaign_bead(campaign_bead)
 
             if stage == "plan":
                 resolved_spec = resolved_specs[i]
@@ -5325,9 +5442,34 @@ def run(
                         dry_run=False,
                         store=_store,
                     )
+                    # Campaign gate: after impl, wait until 0 open impl issues
+                    # before allowing the next milestone to start.
+                    if is_campaign and repo_ref:
+                        click.echo(
+                            f"[campaign] Waiting for all impl issues to close for {ms}…",
+                            err=True,
+                        )
+                        while True:
+                            open_count = _count_open_issues_by_label(repo_ref, ms, IMPL_LABEL)
+                            if open_count == 0:
+                                break
+                            click.echo(
+                                f"[campaign] {open_count} impl issue(s) still open for {ms}. "
+                                f"Sleeping {BACKOFF_SLEEP_SECONDS}s…",
+                                err=True,
+                            )
+                            time.sleep(BACKOFF_SLEEP_SECONDS)
+                        click.echo(f"[campaign] {ms} fully shipped.", err=True)
+
+        # Mark milestone as shipped in campaign bead
+        if is_campaign and not dry_run and campaign_store is not None:
+            campaign_bead.statuses[ms] = "shipped"
+            campaign_bead.current_index = i + 1
+            campaign_bead.updated_at = datetime.now(UTC).isoformat()
+            campaign_store.write_campaign_bead(campaign_bead)
 
 
-@composer.command("init")
+@brimstone.command("init")
 @click.argument("repo")
 @click.option("--model", default=None, help="Override Claude model")
 @click.option("--dry-run", is_flag=True, help="Print what would happen without executing")
@@ -5415,10 +5557,71 @@ def init(
     )
 
 
-@composer.command("adopt")
+@brimstone.command("adopt")
 @click.option("--source-repo", required=True, help="Source repository to adopt from.")
 @click.option("--target-repo", default=None, help="Target repository (defaults to source).")
 def adopt(source_repo: str, target_repo: str | None) -> None:
     """Adopt an existing repository into the brimstone pipeline. (Not yet implemented.)"""
     click.echo("adopt: not yet implemented", err=True)
     raise SystemExit(1)
+
+
+@brimstone.command("status")
+@click.option(
+    "--repo",
+    default=None,
+    help="Repository in owner/repo format. Inferred from git remote if omitted.",
+)
+def status_cmd(repo: str | None) -> None:
+    """Show campaign status for a repository."""
+    repo_ref = _resolve_repo(repo)
+    if not repo_ref:
+        raise click.UsageError(
+            "Could not determine repository. Pass --repo <owner/repo> or run from a git repo."
+        )
+
+    config = load_config(github_repo=repo_ref, target_repo=repo_ref)
+    store = make_bead_store(config, repo_ref)
+    campaign = store.read_campaign_bead()
+
+    # Derive a short project name from the repo slug
+    project_name = repo_ref.split("/")[-1] if "/" in repo_ref else repo_ref
+    click.echo(f"{project_name} ({repo_ref})")
+
+    if campaign is None:
+        # No campaign bead — fall back to querying GitHub for milestone summaries
+        result = _gh(
+            ["api", f"repos/{repo_ref}/milestones", "--paginate", "-q", ".[].title"],
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            click.echo("  (no milestones found)")
+            return
+        milestone_titles = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        last_idx = len(milestone_titles) - 1
+        for idx, ms in enumerate(milestone_titles):
+            open_count = _count_open_issues_by_label(repo_ref, ms, IMPL_LABEL)
+            connector = "└──" if idx == last_idx else "├──"
+            if open_count == 0:
+                click.echo(f"{connector} {ms}  [SHIPPED]")
+            else:
+                click.echo(f"{connector} {ms}  [PENDING  {open_count} impl issues open]")
+        return
+
+    milestones = campaign.milestones
+    last_idx = len(milestones) - 1
+    for idx, ms in enumerate(milestones):
+        connector = "└──" if idx == last_idx else "├──"
+        raw_status = campaign.statuses.get(ms, "pending")
+        status_upper = raw_status.upper()
+
+        if raw_status == "shipped":
+            click.echo(f"{connector} {ms}  [{status_upper}]")
+        elif raw_status == "implementing":
+            open_count = _count_open_issues_by_label(repo_ref, ms, IMPL_LABEL)
+            total_count = _count_all_issues_by_label(repo_ref, ms, IMPL_LABEL)
+            click.echo(
+                f"{connector} {ms}  [{status_upper}  {open_count}/{total_count} issues open]"
+            )
+        else:
+            click.echo(f"{connector} {ms}  [{status_upper}]")
