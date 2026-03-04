@@ -287,7 +287,7 @@ def test_assemble_command_fallback_model_absent_when_none() -> None:
 
 
 def test_assemble_command_fallback_model_absent_when_equals_model() -> None:
-    """When fallback_model equals model, --fallback-model is absent (claude rejects identical pairs)."""
+    """--fallback-model absent when fallback_model == model (claude rejects identical pairs)."""
     model = "claude-haiku-4-5-20251001"
     cmd = _assemble_command(
         prompt="x",
