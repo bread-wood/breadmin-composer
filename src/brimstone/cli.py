@@ -3226,11 +3226,7 @@ def _run_impl_worker(
         unblocked = _filter_unblocked(open_issues, open_issue_numbers)
         ranked = _sort_issues(unblocked)
         if not ranked:
-            next_version = _find_next_version(milestone)
-            click.echo(
-                f"[dry-run] No open impl issues — would file "
-                f"'Run plan-milestones for {next_version}' pipeline issue."
-            )
+            click.echo("[dry-run] No open impl issues — implementation complete.")
         else:
             for issue in ranked:
                 issue_number = issue["number"]
@@ -3369,40 +3365,15 @@ def _run_impl_worker(
         def _when_empty() -> bool:
             open_issues = _list_open_impl_issues(repo, milestone)
             if not open_issues:
-                next_version = _find_next_version(milestone)
-                _gh(
-                    [
-                        "issue",
-                        "create",
-                        "--title",
-                        f"Run plan-milestones for {next_version}",
-                        "--label",
-                        "pipeline",
-                        "--body",
-                        (
-                            f"Pipeline stage transition: impl-worker has completed "
-                            f"all implementation issues for {milestone}. "
-                            f"Time to plan the next version."
-                        ),
-                    ],
-                    repo=repo,
-                    check=False,
-                )
                 logger.log_conductor_event(
                     run_id=checkpoint.run_id,
                     phase="complete",
                     event_type="stage_complete",
-                    payload={
-                        "milestone": milestone,
-                        "next_pipeline_issue": f"Run plan-milestones for {next_version}",
-                    },
+                    payload={"milestone": milestone},
                     log_dir=config.log_dir.expanduser(),
                 )
                 session.save(checkpoint, checkpoint_path)
-                click.echo(
-                    f"Implementation milestone '{milestone}' complete. "
-                    f"Filed 'Run plan-milestones for {next_version}' pipeline issue."
-                )
+                click.echo(f"Implementation milestone '{milestone}' complete.")
                 return True
             return False
 

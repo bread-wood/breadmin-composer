@@ -801,8 +801,8 @@ class TestMonitorPr:
 
 
 class TestRunImplWorkerCompletionGate:
-    def test_completion_gate_files_pipeline_issue_when_no_open_issues(self, tmp_path: Path) -> None:
-        """When no open impl issues remain, files 'Run plan-milestones' issue and stops."""
+    def test_completion_gate_logs_stage_complete_when_no_open_issues(self, tmp_path: Path) -> None:
+        """When no open impl issues remain, logs stage_complete event and stops."""
         config = make_config()
         object.__setattr__(config, "checkpoint_dir", tmp_path)
         object.__setattr__(config, "log_dir", tmp_path)
@@ -811,7 +811,7 @@ class TestRunImplWorkerCompletionGate:
         with (
             patch("brimstone.cli._list_open_impl_issues", return_value=[]),
             patch("brimstone.cli._gh") as mock_gh,
-            patch("brimstone.cli.logger.log_conductor_event"),
+            patch("brimstone.cli.logger.log_conductor_event") as mock_log_event,
             patch("brimstone.cli.session.save"),
             patch("brimstone.cli.click.echo"),
         ):
@@ -823,14 +823,13 @@ class TestRunImplWorkerCompletionGate:
                 checkpoint=checkpoint,
             )
 
-        # Should have called _gh to create the pipeline issue
-        create_calls = [
-            c for c in mock_gh.call_args_list if "create" in str(c) and "plan-milestones" in str(c)
+        stage_complete_calls = [
+            c for c in mock_log_event.call_args_list if "stage_complete" in str(c)
         ]
-        assert len(create_calls) >= 1
+        assert len(stage_complete_calls) >= 1
 
-    def test_completion_gate_dry_run_does_not_call_gh(self, tmp_path: Path) -> None:
-        """In dry-run mode, completion gate prints without calling _gh for issue creation."""
+    def test_completion_gate_dry_run_prints_complete_message(self, tmp_path: Path) -> None:
+        """In dry-run mode, completion gate prints without calling _gh."""
         config = make_config()
         object.__setattr__(config, "checkpoint_dir", tmp_path)
         object.__setattr__(config, "log_dir", tmp_path)
@@ -851,16 +850,13 @@ class TestRunImplWorkerCompletionGate:
                 dry_run=True,
             )
 
-        # _gh should NOT have been called to create a pipeline issue in dry-run
-        create_calls = [
-            c for c in mock_gh.call_args_list if "create" in str(c) and "plan-milestones" in str(c)
-        ]
+        # _gh should NOT have been called in dry-run
+        create_calls = [c for c in mock_gh.call_args_list if "create" in str(c)]
         assert len(create_calls) == 0
 
         # But echo should have been called with the dry-run message
         echo_texts = " ".join(str(c) for c in mock_echo.call_args_list)
         assert "dry-run" in echo_texts
-        assert "plan-milestones" in echo_texts
 
 
 # ---------------------------------------------------------------------------
