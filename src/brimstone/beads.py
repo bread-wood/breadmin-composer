@@ -1,14 +1,16 @@
 """Bead files — atomic JSON state for brimstone orchestration.
 
-Replaces checkpoint.json for issue/PR lifecycle tracking. Three bead types:
+Replaces checkpoint.json for issue/PR lifecycle tracking. Four bead types:
   - WorkBead:    issue lifecycle (claimed → pr_open → merge_ready → closed)
   - PRBead:      PR + feedback triage state
   - MergeQueue:  sequential merge ordering (replaces inline gh pr merge calls)
+  - CampaignBead: multi-milestone campaign progress tracking
 
 Beads are stored under ~/.brimstone/beads/<owner>/<repo>/:
   work/<issue_number>.json
   prs/pr-<pr_number>.json
   merge-queue.json
+  campaign.json
 
 All writes use write-to-.tmp + os.replace (atomic on POSIX).
 """
@@ -113,6 +115,20 @@ class MergeQueue:
     updated_at: str = ""
 
 
+@dataclass
+class CampaignBead:
+    """Multi-milestone campaign progress tracking — one file per repo."""
+
+    v: int = 1
+    repo: str = ""
+    milestones: list[str] = field(default_factory=list)  # ordered
+    current_index: int = 0
+    statuses: dict[str, str] = field(default_factory=dict)
+    # status values: "pending" | "planning" | "researching" | "designing"
+    #                | "scoping" | "implementing" | "shipped"
+    updated_at: str = ""
+
+
 # ---------------------------------------------------------------------------
 # BeadStore
 # ---------------------------------------------------------------------------
@@ -150,6 +166,9 @@ class BeadStore:
     def _merge_queue_path(self) -> Path:
         return self._beads_dir / "merge-queue.json"
 
+    def _campaign_path(self) -> Path:
+        return self._beads_dir / "campaign.json"
+
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
@@ -174,6 +193,18 @@ class BeadStore:
         if not path.exists():
             return MergeQueue(v=BEAD_SCHEMA_VERSION)
         return _load_merge_queue(path)
+
+    def read_campaign_bead(self) -> CampaignBead | None:
+        """Return the CampaignBead, or None if no campaign file exists."""
+        path = self._campaign_path()
+        if not path.exists():
+            return None
+        return _load_campaign_bead(path)
+
+    def write_campaign_bead(self, bead: CampaignBead) -> None:
+        """Atomically write *bead* to disk."""
+        path = self._campaign_path()
+        _atomic_write(path, _campaign_bead_to_dict(bead))
 
     # ------------------------------------------------------------------
     # Lists
@@ -387,3 +418,19 @@ def _pr_bead_to_dict(bead: PRBead) -> dict:
 
 def _merge_queue_to_dict(queue: MergeQueue) -> dict:
     return asdict(queue)
+
+
+def _load_campaign_bead(path: Path) -> CampaignBead:
+    data = _load_json(path)
+    return CampaignBead(
+        v=data.get("v", 1),
+        repo=data.get("repo", ""),
+        milestones=data.get("milestones", []),
+        current_index=data.get("current_index", 0),
+        statuses=data.get("statuses", {}),
+        updated_at=data.get("updated_at", ""),
+    )
+
+
+def _campaign_bead_to_dict(bead: CampaignBead) -> dict:
+    return asdict(bead)

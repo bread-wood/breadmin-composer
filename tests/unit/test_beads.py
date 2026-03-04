@@ -11,6 +11,7 @@ from brimstone.beads import (
     BEAD_SCHEMA_VERSION,
     BeadCorruptError,
     BeadStore,
+    CampaignBead,
     FeedbackItem,
     MergeQueue,
     MergeQueueEntry,
@@ -338,6 +339,83 @@ class TestMakeBreadStore:
             mock_run.assert_not_called()
         assert store._state_repo_path is None
 
+
+# ---------------------------------------------------------------------------
+# CampaignBead round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestCampaignBeadRoundTrip:
+    def test_read_absent_returns_none(self, store: BeadStore) -> None:
+        assert store.read_campaign_bead() is None
+
+    def test_write_and_read(self, store: BeadStore) -> None:
+        bead = CampaignBead(
+            v=1,
+            repo="owner/repo",
+            milestones=["v0.1.0", "v0.2.0"],
+            current_index=0,
+            statuses={"v0.1.0": "pending", "v0.2.0": "pending"},
+            updated_at="2026-03-04T12:00:00+00:00",
+        )
+        store.write_campaign_bead(bead)
+        loaded = store.read_campaign_bead()
+        assert loaded is not None
+        assert loaded.repo == "owner/repo"
+        assert loaded.milestones == ["v0.1.0", "v0.2.0"]
+        assert loaded.current_index == 0
+        assert loaded.statuses == {"v0.1.0": "pending", "v0.2.0": "pending"}
+
+    def test_overwrite_updates_status(self, store: BeadStore) -> None:
+        bead = CampaignBead(
+            v=1,
+            repo="owner/repo",
+            milestones=["v0.1.0"],
+            current_index=0,
+            statuses={"v0.1.0": "pending"},
+            updated_at="2026-03-04T12:00:00+00:00",
+        )
+        store.write_campaign_bead(bead)
+        bead.statuses["v0.1.0"] = "shipped"
+        bead.current_index = 1
+        store.write_campaign_bead(bead)
+        loaded = store.read_campaign_bead()
+        assert loaded is not None
+        assert loaded.statuses["v0.1.0"] == "shipped"
+        assert loaded.current_index == 1
+
+    def test_no_tmp_file_after_write(self, store: BeadStore, tmp_path: Path) -> None:
+        bead = CampaignBead(
+            v=1,
+            repo="owner/repo",
+            milestones=["v0.1.0"],
+            current_index=0,
+            statuses={"v0.1.0": "pending"},
+            updated_at="2026-03-04T12:00:00+00:00",
+        )
+        store.write_campaign_bead(bead)
+        tmp_files = list((tmp_path / "beads").glob("*.tmp"))
+        assert tmp_files == [], "No .tmp files should remain after write"
+
+    def test_campaign_json_stored_at_expected_path(self, store: BeadStore, tmp_path: Path) -> None:
+        bead = CampaignBead(
+            v=1,
+            repo="owner/repo",
+            milestones=[],
+            current_index=0,
+            statuses={},
+            updated_at="",
+        )
+        store.write_campaign_bead(bead)
+        assert (tmp_path / "beads" / "campaign.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# make_bead_store — path construction (continued)
+# ---------------------------------------------------------------------------
+
+
+class TestMakeBreadStoreClone:
     def test_state_repo_cloned_when_not_present(self, tmp_path: Path) -> None:
         config = MagicMock()
         config.beads_dir = tmp_path / "beads"
