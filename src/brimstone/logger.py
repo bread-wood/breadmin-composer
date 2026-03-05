@@ -70,6 +70,7 @@ BRIMSTONE_EVENT_TYPES: frozenset[str] = frozenset(
         "agent_nuclear_restart",
         "agent_exception",
         "recovery_dispatched",
+        "dependency_pruned",
     }
 )
 

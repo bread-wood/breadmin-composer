@@ -670,8 +670,8 @@ def test_log_conductor_event_appends_multiple_events(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_conductor_event_types_contains_all_16() -> None:
-    """BRIMSTONE_EVENT_TYPES contains exactly the 16 documented event types."""
+def test_conductor_event_types_contains_all_17() -> None:
+    """BRIMSTONE_EVENT_TYPES contains exactly the 17 documented event types."""
     expected = {
         "stage_start",
         "issue_claimed",
@@ -690,5 +690,6 @@ def test_conductor_event_types_contains_all_16() -> None:
         "agent_nuclear_restart",
         "agent_exception",
         "recovery_dispatched",
+        "dependency_pruned",
     }
     assert BRIMSTONE_EVENT_TYPES == expected

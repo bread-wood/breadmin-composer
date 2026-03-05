@@ -1,16 +1,18 @@
 """Bead files — atomic JSON state for brimstone orchestration.
 
-Replaces checkpoint.json for issue/PR lifecycle tracking. Five bead types:
+Replaces checkpoint.json for issue/PR lifecycle tracking. Six bead types:
   - WorkBead:       issue lifecycle (claimed → pr_open → merge_ready → closed)
   - PRBead:         PR + feedback triage state
   - MergeQueue:     sequential merge ordering (replaces inline gh pr merge calls)
   - CampaignBead:   multi-milestone campaign progress tracking
   - MilestoneBead:  per-milestone lifecycle state (one file per milestone)
+  - AnomalyBead:    monitor-detected aberration lifecycle (open → repaired | wont_fix)
 
 Beads are stored under ~/.brimstone/beads/<owner>/<repo>/:
   work/<issue_number>.json
   prs/pr-<pr_number>.json
   milestones/<milestone-name>.json
+  anomalies/<anomaly_id>.json        ← pinned to the repo where anomaly was detected
   merge-queue.json
   campaign.json
   events/work-<issue_number>.jsonl   ← append-only state-transition log
@@ -171,6 +173,32 @@ class MilestoneBead:
 
 
 @dataclass
+class AnomalyBead:
+    """Monitor-detected aberration — one file per anomaly, pinned to source repo.
+
+    Lifecycle: open → repaired | wont_fix
+    Auto-repair anomalies attempt inline fixes; deferred anomalies file a GH issue
+    in the source repo's ``repairs`` milestone and wait for human resolution.
+    """
+
+    v: int = 1
+    anomaly_id: str = ""  # first 16 hex chars of SHA-256(fingerprint)
+    source_repo: str = ""  # "owner/repo" where anomaly was detected
+    kind: str = ""  # e.g. "label_drift", "dep_cycle"
+    severity: str = ""  # "warning" | "critical"
+    is_blocking: bool = False  # blocks the active milestone's critical path
+    repair_tier: str = "probe"  # "inline" | "bug" | "probe"
+    description: str = ""
+    details: dict = field(default_factory=dict)
+    state: str = "open"  # "open" | "repaired" | "wont_fix"
+    auto_repair_attempts: int = 0
+    gh_issue_number: int | None = None
+    gh_issue_url: str | None = None
+    detected_at: str = ""
+    resolved_at: str | None = None
+
+
+@dataclass
 class BeadEvent:
     """A single state-transition event appended to an events JSONL file."""
 
@@ -256,6 +284,7 @@ class BeadStore:
         (beads_dir / "work").mkdir(parents=True, exist_ok=True)
         (beads_dir / "prs").mkdir(parents=True, exist_ok=True)
         (beads_dir / "milestones").mkdir(parents=True, exist_ok=True)
+        (beads_dir / "anomalies").mkdir(parents=True, exist_ok=True)
         (beads_dir / "events").mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -277,6 +306,9 @@ class BeadStore:
     def _milestone_path(self, name: str) -> Path:
         safe_name = name.replace("/", "-")
         return self._beads_dir / "milestones" / f"{safe_name}.json"
+
+    def _anomaly_path(self, anomaly_id: str) -> Path:
+        return self._beads_dir / "anomalies" / f"{anomaly_id}.json"
 
     def _events_path(self, bead_type: str, bead_id: str) -> Path:
         return self._beads_dir / "events" / f"{bead_type}-{bead_id}.jsonl"
@@ -411,6 +443,31 @@ class BeadStore:
         """Atomically write *bead* to disk."""
         path = self._milestone_path(bead.name)
         _atomic_write(path, _milestone_bead_to_dict(bead))
+
+    def read_anomaly_bead(self, anomaly_id: str) -> AnomalyBead | None:
+        """Return the AnomalyBead for *anomaly_id*, or None if absent."""
+        path = self._anomaly_path(anomaly_id)
+        if not path.exists():
+            return None
+        return _load_anomaly_bead(path)
+
+    def write_anomaly_bead(self, bead: AnomalyBead) -> None:
+        """Atomically write *bead* to disk."""
+        path = self._anomaly_path(bead.anomaly_id)
+        _atomic_write(path, _anomaly_bead_to_dict(bead))
+
+    def list_anomaly_beads(self, state: str | None = None) -> list[AnomalyBead]:
+        """Return all AnomalyBeads, optionally filtered by *state*."""
+        anomalies_dir = self._beads_dir / "anomalies"
+        results: list[AnomalyBead] = []
+        for p in sorted(anomalies_dir.glob("*.json")):
+            try:
+                bead = _load_anomaly_bead(p)
+            except BeadCorruptError:
+                continue
+            if state is None or bead.state == state:
+                results.append(bead)
+        return results
 
     # ------------------------------------------------------------------
     # Lists
@@ -762,4 +819,29 @@ def _load_milestone_bead(path: Path) -> MilestoneBead:
 
 
 def _milestone_bead_to_dict(bead: MilestoneBead) -> dict:
+    return asdict(bead)
+
+
+def _load_anomaly_bead(path: Path) -> AnomalyBead:
+    data = _load_json(path)
+    return AnomalyBead(
+        v=data.get("v", 1),
+        anomaly_id=data.get("anomaly_id", ""),
+        source_repo=data.get("source_repo", ""),
+        kind=data.get("kind", ""),
+        severity=data.get("severity", ""),
+        is_blocking=data.get("is_blocking", False),
+        repair_tier=data.get("repair_tier", "deferred"),
+        description=data.get("description", ""),
+        details=data.get("details", {}),
+        state=data.get("state", "open"),
+        auto_repair_attempts=data.get("auto_repair_attempts", 0),
+        gh_issue_number=data.get("gh_issue_number"),
+        gh_issue_url=data.get("gh_issue_url"),
+        detected_at=data.get("detected_at", ""),
+        resolved_at=data.get("resolved_at"),
+    )
+
+
+def _anomaly_bead_to_dict(bead: AnomalyBead) -> dict:
     return asdict(bead)

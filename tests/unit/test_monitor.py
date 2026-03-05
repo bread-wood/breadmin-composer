@@ -9,18 +9,27 @@ from unittest.mock import MagicMock, patch
 
 from brimstone.beads import (
     BEAD_SCHEMA_VERSION,
+    AnomalyBead,
     BeadStore,
     MergeQueue,
     MergeQueueEntry,
     WorkBead,
 )
 from brimstone.monitor import (
+    INLINE_REPAIR_MAX_ATTEMPTS,
     Anomaly,
+    _anomaly_id,
+    _apply_inline_repair,
+    _get_active_milestone,
+    _inline_repair_label_drift,
+    _inline_repair_orphaned_merge,
     check_dep_integrity,
     check_label_drift,
     check_orphaned_merge,
     check_pre_pr_zombies,
     check_state_regressions,
+    classify_blocking,
+    classify_repair_tier,
     process_anomalies,
     run_all_detectors,
 )
@@ -60,6 +69,13 @@ def _make_store(tmp_path: Path) -> BeadStore:
     return BeadStore(tmp_path)
 
 
+def _make_gh_result(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
+    r = MagicMock(spec=subprocess.CompletedProcess)
+    r.stdout = stdout
+    r.returncode = returncode
+    return r
+
+
 # ---------------------------------------------------------------------------
 # Anomaly.fingerprint
 # ---------------------------------------------------------------------------
@@ -88,19 +104,149 @@ def test_anomaly_fingerprint_differs_by_details():
 
 
 # ---------------------------------------------------------------------------
+# _anomaly_id
+# ---------------------------------------------------------------------------
+
+
+def test_anomaly_id_stable():
+    a = Anomaly(kind="label_drift", severity="warning", description="x", details={"n": 1})
+    assert _anomaly_id(a) == _anomaly_id(a)
+    assert len(_anomaly_id(a)) == 16
+
+
+def test_anomaly_id_differs_by_kind():
+    a = Anomaly(kind="label_drift", severity="warning", description="x", details={"n": 1})
+    b = Anomaly(kind="dep_cycle", severity="warning", description="x", details={"n": 1})
+    assert _anomaly_id(a) != _anomaly_id(b)
+
+
+# ---------------------------------------------------------------------------
+# classify_repair_tier
+# ---------------------------------------------------------------------------
+
+
+def test_classify_repair_tier_inline():
+    a = Anomaly(kind="label_drift", severity="w", description="")
+    assert classify_repair_tier(a) == "inline"
+    b = Anomaly(kind="orphaned_merge", severity="w", description="")
+    assert classify_repair_tier(b) == "inline"
+
+
+def test_classify_repair_tier_bug():
+    a = Anomaly(kind="pre_pr_zombie", severity="w", description="")
+    assert classify_repair_tier(a) == "bug"
+
+
+def test_classify_repair_tier_probe():
+    for kind in ("dep_cycle", "phantom_dep", "state_regression", "detector_error"):
+        assert classify_repair_tier(Anomaly(kind=kind, severity="c", description="")) == "probe"
+
+
+# ---------------------------------------------------------------------------
+# classify_blocking
+# ---------------------------------------------------------------------------
+
+
+def test_classify_blocking_always_blocking(tmp_path):
+    store = _make_store(tmp_path)
+    for kind in ("dep_cycle", "phantom_dep", "state_regression", "orphaned_merge"):
+        a = Anomaly(kind=kind, severity="critical", description="x")
+        assert classify_blocking(a, store, "v1.0") is True
+
+
+def test_classify_blocking_detector_error_never(tmp_path):
+    store = _make_store(tmp_path)
+    a = Anomaly(kind="detector_error", severity="warning", description="x")
+    assert classify_blocking(a, store, "v1.0") is False
+
+
+def test_classify_blocking_pre_pr_zombie_in_active_milestone(tmp_path):
+    store = _make_store(tmp_path)
+    bead = _make_work_bead(7, state="claimed", milestone="v1.0")
+    store.write_work_bead(bead)
+    a = Anomaly(
+        kind="pre_pr_zombie",
+        severity="warning",
+        description="x",
+        details={"issue_number": 7},
+    )
+    assert classify_blocking(a, store, "v1.0") is True
+
+
+def test_classify_blocking_pre_pr_zombie_different_milestone(tmp_path):
+    store = _make_store(tmp_path)
+    bead = _make_work_bead(7, state="claimed", milestone="v2.0")
+    store.write_work_bead(bead)
+    a = Anomaly(
+        kind="pre_pr_zombie",
+        severity="warning",
+        description="x",
+        details={"issue_number": 7},
+    )
+    assert classify_blocking(a, store, "v1.0") is False
+
+
+def test_classify_blocking_pre_pr_zombie_no_active_milestone(tmp_path):
+    store = _make_store(tmp_path)
+    a = Anomaly(
+        kind="pre_pr_zombie", severity="warning", description="x", details={"issue_number": 7}
+    )
+    assert classify_blocking(a, store, None) is False
+
+
+def test_classify_blocking_label_drift_zombie_label_on_closed(tmp_path):
+    store = _make_store(tmp_path)
+    a = Anomaly(
+        kind="label_drift",
+        severity="critical",
+        description="x",
+        details={"issue_number": 5, "bead_state": "closed", "has_label": True},
+    )
+    assert classify_blocking(a, store, "v1.0") is True
+
+
+def test_classify_blocking_label_drift_missing_label_not_blocking(tmp_path):
+    store = _make_store(tmp_path)
+    a = Anomaly(
+        kind="label_drift",
+        severity="warning",
+        description="x",
+        details={"issue_number": 5, "bead_state": "claimed", "has_label": False},
+    )
+    assert classify_blocking(a, store, "v1.0") is False
+
+
+# ---------------------------------------------------------------------------
+# _get_active_milestone
+# ---------------------------------------------------------------------------
+
+
+def test_get_active_milestone_no_campaign(tmp_path):
+    store = _make_store(tmp_path)
+    assert _get_active_milestone(store) is None
+
+
+def test_get_active_milestone_finds_first_non_shipped(tmp_path):
+    from brimstone.beads import CampaignBead
+
+    store = _make_store(tmp_path)
+    campaign = CampaignBead(
+        v=1,
+        repo="owner/repo",
+        milestones=["v1.0", "v2.0", "v3.0"],
+        current_index=0,
+        statuses={"v1.0": "shipped", "v2.0": "implementing", "v3.0": "pending"},
+    )
+    store.write_campaign_bead(campaign)
+    assert _get_active_milestone(store) == "v2.0"
+
+
+# ---------------------------------------------------------------------------
 # check_label_drift
 # ---------------------------------------------------------------------------
 
 
-def _make_gh_result(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
-    r = MagicMock(spec=subprocess.CompletedProcess)
-    r.stdout = stdout
-    r.returncode = returncode
-    return r
-
-
 def test_check_label_drift_clean(tmp_path):
-    """No beads, no in-progress labels → no anomalies."""
     store = _make_store(tmp_path)
     with patch("brimstone.monitor._gh") as mock_gh:
         mock_gh.return_value = _make_gh_result("[]")
@@ -109,7 +255,6 @@ def test_check_label_drift_clean(tmp_path):
 
 
 def test_check_label_drift_claimed_missing_label(tmp_path):
-    """Claimed bead but no in-progress label → label_drift anomaly."""
     store = _make_store(tmp_path)
     bead = _make_work_bead(10, state="claimed")
     store.write_work_bead(bead)
@@ -125,9 +270,7 @@ def test_check_label_drift_claimed_missing_label(tmp_path):
 
 
 def test_check_label_drift_label_no_bead(tmp_path):
-    """in-progress label on issue with no bead → label_drift anomaly."""
     store = _make_store(tmp_path)
-
     with patch("brimstone.monitor._gh") as mock_gh:
         mock_gh.return_value = _make_gh_result(json.dumps([{"number": 42}]))
         anomalies = check_label_drift(store, "owner/repo")
@@ -139,7 +282,6 @@ def test_check_label_drift_label_no_bead(tmp_path):
 
 
 def test_check_label_drift_closed_bead_with_label_is_critical(tmp_path):
-    """Closed bead with in-progress label → critical severity."""
     store = _make_store(tmp_path)
     bead = _make_work_bead(7, state="closed")
     store.write_work_bead(bead)
@@ -153,7 +295,6 @@ def test_check_label_drift_closed_bead_with_label_is_critical(tmp_path):
 
 
 def test_check_label_drift_clean_claimed_with_label(tmp_path):
-    """Claimed bead AND in-progress label → no anomaly."""
     store = _make_store(tmp_path)
     bead = _make_work_bead(5, state="claimed")
     store.write_work_bead(bead)
@@ -171,14 +312,12 @@ def test_check_label_drift_clean_claimed_with_label(tmp_path):
 
 
 def test_check_dep_integrity_clean(tmp_path):
-    """No deps → no anomalies."""
     store = _make_store(tmp_path)
     store.write_work_bead(_make_work_bead(1))
     assert check_dep_integrity(store) == []
 
 
 def test_check_dep_integrity_phantom_dep(tmp_path):
-    """Bead blocked_by an issue number with no bead → phantom_dep anomaly."""
     store = _make_store(tmp_path)
     bead = _make_work_bead(2, blocked_by=[999])
     store.write_work_bead(bead)
@@ -190,7 +329,6 @@ def test_check_dep_integrity_phantom_dep(tmp_path):
 
 
 def test_check_dep_integrity_cycle(tmp_path):
-    """Two beads blocking each other → dep_cycle anomaly."""
     store = _make_store(tmp_path)
     store.write_work_bead(_make_work_bead(10, blocked_by=[11]))
     store.write_work_bead(_make_work_bead(11, blocked_by=[10]))
@@ -201,7 +339,6 @@ def test_check_dep_integrity_cycle(tmp_path):
 
 
 def test_check_dep_integrity_closed_phantom_skipped(tmp_path):
-    """Closed bead blocked_by phantom → not flagged (closed beads skip check)."""
     store = _make_store(tmp_path)
     bead = _make_work_bead(3, state="closed", blocked_by=[999])
     store.write_work_bead(bead)
@@ -216,7 +353,6 @@ def test_check_dep_integrity_closed_phantom_skipped(tmp_path):
 
 
 def test_check_state_regressions_clean(tmp_path):
-    """Normal transitions → no anomalies."""
     store = _make_store(tmp_path)
     bead = _make_work_bead(1)
     store.write_work_bead(bead)
@@ -229,7 +365,6 @@ def test_check_state_regressions_clean(tmp_path):
 
 
 def test_check_state_regressions_bad_transition(tmp_path):
-    """merge_ready → open transition → state_regression anomaly."""
     store = _make_store(tmp_path)
     bead = _make_work_bead(1)
     store.write_work_bead(bead)
@@ -246,7 +381,6 @@ def test_check_state_regressions_bad_transition(tmp_path):
 
 
 def test_check_state_regressions_closed_to_open(tmp_path):
-    """closed → open → state_regression anomaly."""
     store = _make_store(tmp_path)
     bead = _make_work_bead(2)
     store.write_work_bead(bead)
@@ -263,7 +397,6 @@ def test_check_state_regressions_closed_to_open(tmp_path):
 
 
 def test_check_orphaned_merge_clean(tmp_path):
-    """merge_ready bead in MergeQueue → no anomaly."""
     store = _make_store(tmp_path)
     bead = _make_work_bead(5, state="merge_ready")
     store.write_work_bead(bead)
@@ -280,11 +413,9 @@ def test_check_orphaned_merge_clean(tmp_path):
 
 
 def test_check_orphaned_merge_missing_from_queue(tmp_path):
-    """merge_ready bead absent from MergeQueue → orphaned_merge anomaly."""
     store = _make_store(tmp_path)
     bead = _make_work_bead(5, state="merge_ready")
     store.write_work_bead(bead)
-    # Don't add to queue
 
     anomalies = check_orphaned_merge(store)
     assert len(anomalies) == 1
@@ -293,7 +424,6 @@ def test_check_orphaned_merge_missing_from_queue(tmp_path):
 
 
 def test_check_orphaned_merge_no_merge_ready(tmp_path):
-    """No merge_ready beads → no anomalies."""
     store = _make_store(tmp_path)
     store.write_work_bead(_make_work_bead(1, state="open"))
     assert check_orphaned_merge(store) == []
@@ -305,13 +435,11 @@ def test_check_orphaned_merge_no_merge_ready(tmp_path):
 
 
 def test_check_pre_pr_zombies_no_claimed(tmp_path):
-    """No claimed beads → no anomalies."""
     store = _make_store(tmp_path)
     assert check_pre_pr_zombies(store) == []
 
 
 def test_check_pre_pr_zombies_fresh_claimed(tmp_path):
-    """Claimed bead claimed recently → no anomaly."""
     store = _make_store(tmp_path)
     from datetime import timedelta
 
@@ -327,7 +455,6 @@ def test_check_pre_pr_zombies_fresh_claimed(tmp_path):
 
 
 def test_check_pre_pr_zombies_old_no_pr(tmp_path):
-    """Claimed bead older than timeout with no pr_id → pre_pr_zombie anomaly."""
     store = _make_store(tmp_path)
     from datetime import timedelta
 
@@ -345,7 +472,6 @@ def test_check_pre_pr_zombies_old_no_pr(tmp_path):
 
 
 def test_check_pre_pr_zombies_has_pr_skipped(tmp_path):
-    """Claimed bead with pr_id → not a zombie."""
     store = _make_store(tmp_path)
     from datetime import timedelta
 
@@ -361,51 +487,319 @@ def test_check_pre_pr_zombies_has_pr_skipped(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# process_anomalies (dedup + filing)
+# Inline repair: _inline_repair_label_drift
+# ---------------------------------------------------------------------------
+
+
+def test_inline_repair_label_drift_add_label(tmp_path):
+    """Missing label → gh issue edit --add-label called."""
+    anomaly = Anomaly(
+        kind="label_drift",
+        severity="warning",
+        description="x",
+        details={"issue_number": 5, "bead_state": "claimed", "has_label": False},
+    )
+    with patch("brimstone.monitor._gh") as mock_gh:
+        mock_gh.return_value = _make_gh_result("", returncode=0)
+        result = _inline_repair_label_drift(anomaly, "owner/repo")
+
+    assert result is True
+    call_args = mock_gh.call_args[0][0]
+    assert "--add-label" in call_args
+
+
+def test_inline_repair_label_drift_remove_label(tmp_path):
+    """Stale label on closed bead → gh issue edit --remove-label called."""
+    anomaly = Anomaly(
+        kind="label_drift",
+        severity="critical",
+        description="x",
+        details={"issue_number": 7, "bead_state": "closed", "has_label": True},
+    )
+    with patch("brimstone.monitor._gh") as mock_gh:
+        mock_gh.return_value = _make_gh_result("", returncode=0)
+        result = _inline_repair_label_drift(anomaly, "owner/repo")
+
+    assert result is True
+    call_args = mock_gh.call_args[0][0]
+    assert "--remove-label" in call_args
+
+
+def test_inline_repair_label_drift_gh_failure(tmp_path):
+    anomaly = Anomaly(
+        kind="label_drift",
+        severity="warning",
+        description="x",
+        details={"issue_number": 5, "bead_state": "claimed", "has_label": False},
+    )
+    with patch("brimstone.monitor._gh") as mock_gh:
+        mock_gh.return_value = _make_gh_result("", returncode=1)
+        result = _inline_repair_label_drift(anomaly, "owner/repo")
+
+    assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Inline repair: _inline_repair_orphaned_merge
+# ---------------------------------------------------------------------------
+
+
+def test_inline_repair_orphaned_merge_inserts_entry(tmp_path):
+    store = _make_store(tmp_path)
+    bead = _make_work_bead(5, state="merge_ready", pr_id="pr-100")
+    store.write_work_bead(bead)
+
+    anomaly = Anomaly(
+        kind="orphaned_merge",
+        severity="warning",
+        description="x",
+        details={"issue_number": 5, "branch": "5-branch"},
+    )
+    result = _inline_repair_orphaned_merge(anomaly, store)
+
+    assert result is True
+    queue = store.read_merge_queue()
+    assert any(e.issue_number == 5 for e in queue.queue)
+
+
+def test_inline_repair_orphaned_merge_no_bead(tmp_path):
+    store = _make_store(tmp_path)
+    anomaly = Anomaly(
+        kind="orphaned_merge",
+        severity="warning",
+        description="x",
+        details={"issue_number": 99, "branch": "99-branch"},
+    )
+    result = _inline_repair_orphaned_merge(anomaly, store)
+    assert result is False
+
+
+def test_inline_repair_orphaned_merge_already_queued(tmp_path):
+    store = _make_store(tmp_path)
+    bead = _make_work_bead(5, state="merge_ready", pr_id="pr-100")
+    store.write_work_bead(bead)
+    queue = MergeQueue(v=BEAD_SCHEMA_VERSION)
+    queue.queue.append(
+        MergeQueueEntry(
+            pr_number=100,
+            issue_number=5,
+            branch="5-branch",
+            enqueued_at="2024-01-01T00:00:00+00:00",
+        )
+    )
+    store.write_merge_queue(queue)
+
+    anomaly = Anomaly(
+        kind="orphaned_merge",
+        severity="warning",
+        description="x",
+        details={"issue_number": 5, "branch": "5-branch"},
+    )
+    result = _inline_repair_orphaned_merge(anomaly, store)
+    assert result is True  # idempotent — entry already present
+
+
+# ---------------------------------------------------------------------------
+# _apply_inline_repair dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_apply_inline_repair_routes_label_drift(tmp_path):
+    store = _make_store(tmp_path)
+    anomaly = Anomaly(
+        kind="label_drift",
+        severity="warning",
+        description="x",
+        details={"issue_number": 5, "has_label": False},
+    )
+    with patch("brimstone.monitor._inline_repair_label_drift", return_value=True) as mock_fn:
+        result = _apply_inline_repair(anomaly, store, "owner/repo")
+    mock_fn.assert_called_once()
+    assert result is True
+
+
+def test_apply_inline_repair_routes_orphaned_merge(tmp_path):
+    store = _make_store(tmp_path)
+    anomaly = Anomaly(
+        kind="orphaned_merge",
+        severity="warning",
+        description="x",
+        details={"issue_number": 5},
+    )
+    with patch("brimstone.monitor._inline_repair_orphaned_merge", return_value=True) as mock_fn:
+        result = _apply_inline_repair(anomaly, store, "owner/repo")
+    mock_fn.assert_called_once()
+    assert result is True
+
+
+def test_apply_inline_repair_unknown_kind_returns_false(tmp_path):
+    store = _make_store(tmp_path)
+    anomaly = Anomaly(kind="dep_cycle", severity="critical", description="x")
+    result = _apply_inline_repair(anomaly, store, "owner/repo")
+    assert result is False
+
+
+# ---------------------------------------------------------------------------
+# process_anomalies — new bead-based behaviour
 # ---------------------------------------------------------------------------
 
 
 def test_process_anomalies_dry_run(tmp_path, capsys):
-    """Dry-run mode prints anomalies without calling gh."""
     store = _make_store(tmp_path)
-    anomaly = Anomaly(kind="test_kind", severity="warning", description="test anomaly")
-
-    with patch("brimstone.monitor.file_anomaly_issue") as mock_file:
+    anomaly = Anomaly(
+        kind="dep_cycle",
+        severity="critical",
+        description="test anomaly",
+        details={"cycle": [1, 2]},
+    )
+    with patch("brimstone.monitor._file_repair_issue") as mock_file:
         urls = process_anomalies([anomaly], store, "owner/repo", dry_run=True)
 
     mock_file.assert_not_called()
     assert urls == []
     captured = capsys.readouterr()
-    assert "test_kind" in captured.out
+    assert "dep_cycle" in captured.out
 
 
-def test_process_anomalies_dedup(tmp_path):
-    """Same anomaly filed twice: second call is skipped."""
+def test_process_anomalies_creates_anomaly_bead(tmp_path):
     store = _make_store(tmp_path)
-    anomaly = Anomaly(kind="dup_kind", severity="warning", description="dup", details={"x": 1})
-    url = "https://github.com/issues/99"
+    anomaly = Anomaly(
+        kind="dep_cycle",
+        severity="critical",
+        description="cycle",
+        details={"cycle": [1, 2]},
+    )
+    with patch("brimstone.monitor._file_repair_issue", return_value="https://github.com/issues/1"):
+        process_anomalies([anomaly], store, "owner/repo")
 
-    with patch("brimstone.monitor.file_anomaly_issue", return_value=url) as mock_file:
+    aid = _anomaly_id(anomaly)
+    bead = store.read_anomaly_bead(aid)
+    assert bead is not None
+    assert bead.kind == "dep_cycle"
+    assert bead.repair_tier == "probe"
+    assert bead.source_repo == "owner/repo"
+
+
+def test_process_anomalies_dedup_by_anomaly_bead(tmp_path):
+    store = _make_store(tmp_path)
+    anomaly = Anomaly(
+        kind="dep_cycle",
+        severity="critical",
+        description="cycle",
+        details={"cycle": [1, 2]},
+    )
+    patch_target = "brimstone.monitor._file_repair_issue"
+    with patch(patch_target, return_value="https://github.com/issues/1") as mock_file:
         process_anomalies([anomaly], store, "owner/repo")
         process_anomalies([anomaly], store, "owner/repo")
 
-    # Should only have been called once
+    # Issue should only be filed once
     assert mock_file.call_count == 1
 
 
-def test_process_anomalies_files_critical(tmp_path):
-    """Critical anomaly → file_anomaly_issue called and URL returned."""
+def test_process_anomalies_inline_applies_repair(tmp_path):
     store = _make_store(tmp_path)
     anomaly = Anomaly(
-        kind="dep_cycle", severity="critical", description="cycle!", details={"cycle": [1, 2]}
+        kind="label_drift",
+        severity="warning",
+        description="missing label",
+        details={"issue_number": 5, "bead_state": "claimed", "has_label": False},
     )
-    url = "https://github.com/issues/50"
+    with patch("brimstone.monitor._apply_inline_repair", return_value=True) as mock_repair:
+        with patch("brimstone.monitor._file_repair_issue") as mock_file:
+            process_anomalies([anomaly], store, "owner/repo")
 
-    with patch("brimstone.monitor.file_anomaly_issue", return_value=url) as mock_file:
+    mock_repair.assert_called_once()
+    mock_file.assert_not_called()  # inline: no issue filed on success
+
+
+def test_process_anomalies_inline_escalates_after_max_failures(tmp_path):
+    store = _make_store(tmp_path)
+    anomaly = Anomaly(
+        kind="label_drift",
+        severity="warning",
+        description="missing label",
+        details={"issue_number": 5, "bead_state": "claimed", "has_label": False},
+    )
+    with patch("brimstone.monitor._apply_inline_repair", return_value=False):
+        issue_url = "https://github.com/issues/99"
+        with patch("brimstone.monitor._file_repair_issue", return_value=issue_url) as mock_file:
+            for _ in range(INLINE_REPAIR_MAX_ATTEMPTS):
+                process_anomalies([anomaly], store, "owner/repo")
+
+    # Should have escalated and filed exactly once
+    mock_file.assert_called_once()
+
+
+def test_process_anomalies_cleanup_sweep_resolves_gone_anomaly(tmp_path):
+    store = _make_store(tmp_path)
+    anomaly = Anomaly(
+        kind="dep_cycle",
+        severity="critical",
+        description="cycle",
+        details={"cycle": [1, 2]},
+    )
+    aid = _anomaly_id(anomaly)
+
+    # First pass: bead created
+    with patch("brimstone.monitor._file_repair_issue", return_value="https://github.com/issues/1"):
+        process_anomalies([anomaly], store, "owner/repo")
+
+    # Second pass: anomaly gone (empty list)
+    with patch("brimstone.monitor._file_repair_issue"):
+        process_anomalies([], store, "owner/repo")
+
+    bead = store.read_anomaly_bead(aid)
+    assert bead is not None
+    assert bead.state == "repaired"
+    assert bead.resolved_at is not None
+
+
+def test_process_anomalies_skips_terminal_beads(tmp_path):
+    store = _make_store(tmp_path)
+    anomaly = Anomaly(
+        kind="dep_cycle",
+        severity="critical",
+        description="cycle",
+        details={"cycle": [1, 2]},
+    )
+    aid = _anomaly_id(anomaly)
+
+    # Pre-write a repaired bead
+    existing = AnomalyBead(
+        v=BEAD_SCHEMA_VERSION,
+        anomaly_id=aid,
+        source_repo="owner/repo",
+        kind="dep_cycle",
+        severity="critical",
+        state="repaired",
+        detected_at="2024-01-01T00:00:00+00:00",
+    )
+    store.write_anomaly_bead(existing)
+
+    with patch("brimstone.monitor._file_repair_issue") as mock_file:
+        process_anomalies([anomaly], store, "owner/repo")
+
+    mock_file.assert_not_called()
+
+
+def test_process_anomalies_probe_files_issue(tmp_path):
+    store = _make_store(tmp_path)
+    anomaly = Anomaly(
+        kind="phantom_dep",
+        severity="critical",
+        description="phantom",
+        details={"issue_number": 10, "phantom_dep": 999},
+    )
+    url = "https://github.com/owner/repo/issues/42"
+    with patch("brimstone.monitor._file_repair_issue", return_value=url) as mock_file:
         urls = process_anomalies([anomaly], store, "owner/repo")
 
+    assert urls == [url]
     mock_file.assert_called_once()
-    assert urls == ["https://github.com/issues/50"]
+    aid = _anomaly_id(anomaly)
+    bead = store.read_anomaly_bead(aid)
+    assert bead.gh_issue_number == 42
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +808,6 @@ def test_process_anomalies_files_critical(tmp_path):
 
 
 def test_run_all_detectors_returns_list(tmp_path):
-    """run_all_detectors always returns a list (no crash even on empty store)."""
     store = _make_store(tmp_path)
     with patch("brimstone.monitor._gh") as mock_gh:
         mock_gh.return_value = _make_gh_result("[]")
@@ -423,7 +816,6 @@ def test_run_all_detectors_returns_list(tmp_path):
 
 
 def test_run_all_detectors_detector_error_caught(tmp_path):
-    """A detector that raises → detector_error anomaly, not a crash."""
     store = _make_store(tmp_path)
 
     def _bad_detector(store, repo):
