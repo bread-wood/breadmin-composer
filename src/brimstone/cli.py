@@ -2908,9 +2908,9 @@ def _get_pr_checks_status(repo: str, pr_number: int) -> str:
     for check in checks:
         bucket = (check.get("bucket") or "").lower()
         state = (check.get("state") or "").lower()
-        if bucket == "fail" or bucket == "cancelling":
+        if bucket in ("fail", "cancel"):
             statuses.append("fail")
-        elif bucket == "pass" or bucket == "skipping":
+        elif bucket in ("pass", "skipping"):
             statuses.append("pass")
         elif state == "completed":
             statuses.append("pass")
@@ -7031,6 +7031,8 @@ def run(
                 once=False,
                 interval=monitor.MONITOR_INTERVAL_SECONDS,
                 dry_run=False,
+                config=config,
+                repo_root=str(Path.cwd()),
             )
 
         _mt = threading.Thread(target=_monitor_thread, daemon=True, name="brimstone-monitor")
@@ -7177,6 +7179,25 @@ def run(
                                 f"[run] {stage} ({ms}): already complete, skipping", err=True
                             )
                             continue
+                        # Cross-milestone design gate: block design for this milestone until
+                        # all listed predecessor milestones have completed their design stage.
+                        if is_campaign and campaign_store is not None:
+                            _design_gates = campaign_bead.design_blocked_by.get(ms, [])
+                            _past_design = {"scoping", "implementing", "shipped"}
+                            _gate_blocked = False
+                            for _gate_ms in _design_gates:
+                                _gate_status = campaign_bead.statuses.get(_gate_ms, "pending")
+                                if _gate_status not in _past_design:
+                                    click.echo(
+                                        f"[run] design ({ms}): gate — {_gate_ms} design not yet"
+                                        f" complete (status: {_gate_status!r})."
+                                        f" Deferring this milestone.",
+                                        err=True,
+                                    )
+                                    _gate_blocked = True
+                                    break
+                            if _gate_blocked:
+                                break  # exit `for stage in stages:` — defer rest of this milestone
                     if stage == "scope":
                         _i_beads = (
                             _skip_store.list_work_beads(milestone=ms, stage="impl")
@@ -7526,5 +7547,12 @@ def monitor_cmd(
     store = make_bead_store(config, repo_ref)
 
     monitor.run_monitor(
-        store, repo_ref, bugs_repo=bugs_repo, once=once, interval=interval, dry_run=dry_run
+        store,
+        repo_ref,
+        bugs_repo=bugs_repo,
+        once=once,
+        interval=interval,
+        dry_run=dry_run,
+        config=config,
+        repo_root=str(Path.cwd()),
     )
