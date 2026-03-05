@@ -1514,6 +1514,10 @@ def _classify_blocking_issues(
         if store is not None:
             bead = store.read_work_bead(issue_number)
             if bead is not None:
+                # If the bead is already closed/abandoned, the GitHub issue is
+                # stale (eventual-consistency lag after PR merge). Skip it.
+                if bead.state in ("closed", "abandoned"):
+                    continue
                 deferred = bead.deferred
         if deferred:
             non_blocking.append(issue)
