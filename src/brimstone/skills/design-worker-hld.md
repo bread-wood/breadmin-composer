@@ -1,4 +1,4 @@
-Write the High-Level Design (HLD) document for a milestone and file LLD issues for each module.
+Write the High-Level Design (HLD) document for a milestone.
 
 **Do NOT use the Agent tool. Do NOT spawn sub-agents.**
 
@@ -115,44 +115,7 @@ git commit -m "docs: add HLD for <milestone> (Closes #<issue_number>) [skip ci]"
 git push -u origin <branch>
 ```
 
-### Step 4 — File LLD Issues
-
-For each module identified in the HLD, check for a duplicate then file a `stage/design` issue:
-
-```bash
-# Fetch existing issue titles scoped to this milestone to check for dups
-# IMPORTANT: scope to --milestone so closed issues from prior milestones
-# (e.g. "Design: LLD for lexer" from v0.1.0) don't suppress creation here.
-EXISTING=$(gh issue list --repo <owner>/<repo> --state all --milestone "<milestone>" --limit 500 --json title --jq '.[].title')
-
-for MODULE in <module1> <module2> ...; do
-  TITLE="Design: LLD for $MODULE"
-  if echo "$EXISTING" | grep -qxF "$TITLE"; then
-    echo "Issue '$TITLE' already exists — skipping"
-  else
-    gh issue create \
-      --repo <owner>/<repo> \
-      --title "$TITLE" \
-      --label "stage/design" \
-      --milestone "<milestone>" \
-      --body "$(cat <<EOF
-## Deliverable
-\`docs/design/lld/$MODULE.md\`
-
-## Inputs
-- HLD: \`docs/design/<milestone>/HLD.md\`
-- Research docs: \`docs/research/<milestone>/\`
-
-## Acceptance Criteria
-The LLD must cover: data structures, key algorithms, public API/interfaces, error
-handling, and test strategy for this module.
-EOF
-)"
-  fi
-done
-```
-
-### Step 5 — Create PR
+### Step 4 — Create PR
 
 ```bash
 DEFAULT_BRANCH=$(gh repo view --repo <owner>/<repo> --json defaultBranchRef --jq '.defaultBranchRef.name')
@@ -163,7 +126,7 @@ gh pr create \
   --base $DEFAULT_BRANCH
 ```
 
-### Step 6 — STOP
+### Step 5 — STOP
 
 Do not merge. The orchestrator monitors the PR and merges when CI passes.
 
@@ -171,7 +134,9 @@ Do not merge. The orchestrator monitors the PR and merges when CI passes.
 
 - **One PR, one doc**: this agent produces only `docs/design/<milestone>/HLD.md`
 - **Milestone-scoped paths**: all paths use `<milestone>` as the directory name, not a generic folder
-- **LLD issues use exact module names**: the names here become file paths
-  (`docs/design/<milestone>/lld/<module>.md`) and must be filesystem-safe
+- **Module names are file paths**: names in `### Module: <name>` headings become paths
+  (`docs/design/<milestone>/lld/<name>.md`) — use filesystem-safe names
 - **No implementation code**: this agent writes documentation only
-- **Check for dup LLD issues** before filing — re-runs must be safe
+- **Do NOT file LLD issues**: the orchestrator parses `### Module:` headings from the merged HLD
+  and files LLD issues itself using bead-based dedup. Filing them here causes duplicates due to
+  GitHub's eventual consistency.

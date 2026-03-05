@@ -127,7 +127,8 @@ _DESIGN_PATCHES = {
     "list_research": "brimstone.cli._list_all_open_issues_by_label",
     "classify_blocking": "brimstone.cli._classify_blocking_issues",
     "default_branch": "brimstone.cli._get_default_branch_for_repo",
-    "repo_root": "brimstone.cli._get_repo_root",
+    "repo_root": "brimstone.cli._ensure_worktree_repo",
+    "parse_modules": "brimstone.cli._parse_modules_from_hld",
     "doc_exists": "brimstone.cli._doc_exists_on_default_branch",
     "list_design": "brimstone.cli._list_open_issues_by_label",
     "file_design": "brimstone.cli._file_design_issue_if_missing",
@@ -184,8 +185,9 @@ class TestDesignWorkerGate1:
             patch(_DESIGN_PATCHES["classify_blocking"], side_effect=_classify_side_effect),
             patch("brimstone.cli.time.sleep"),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], return_value=True),
+            patch(_DESIGN_PATCHES["parse_modules"], return_value=[]),
             patch(_DESIGN_PATCHES["file_design"]),
             patch(_DESIGN_PATCHES["list_design"], return_value=[]),
             patch(_DESIGN_PATCHES["log_event"]),
@@ -222,9 +224,13 @@ class TestDesignWorkerGate1:
 
         with (
             patch(_DESIGN_PATCHES["list_research"], return_value=v2_only),
+            # classify_blocking must be patched: store=None means [DEFERRED] body tag is
+            # not checked (bead-only check), so without this patch Gate 1 loops forever.
+            patch(_DESIGN_PATCHES["classify_blocking"], return_value=([], v2_only)),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], return_value=True),  # HLD exists → skip Phase 1
+            patch(_DESIGN_PATCHES["parse_modules"], return_value=[]),
             patch(_DESIGN_PATCHES["list_design"], return_value=[]),
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
@@ -246,10 +252,12 @@ class TestDesignWorkerGate1:
         checkpoint = make_checkpoint()
 
         with (
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["classify_blocking"], return_value=([], [])),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], return_value=True),  # HLD exists → skip Phase 1
+            patch(_DESIGN_PATCHES["parse_modules"], return_value=[]),
             patch(_DESIGN_PATCHES["list_design"], return_value=[]),
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
@@ -315,10 +323,12 @@ class TestDesignWorkerPhase1:
         lld_issue = make_design_issue(20, "Design: LLD for parser")
 
         with (
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["classify_blocking"], return_value=([], [])),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], side_effect=doc_exists),
+            patch(_DESIGN_PATCHES["parse_modules"], return_value=[]),
             patch(_DESIGN_PATCHES["list_design"], return_value=[lld_issue]),
             patch(_DESIGN_PATCHES["dispatch_agent"]) as mock_dispatch,
             patch(_DESIGN_PATCHES["claim"]),
@@ -365,10 +375,12 @@ class TestDesignWorkerPhase1:
             return []
 
         with (
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["classify_blocking"], return_value=([], [])),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], side_effect=doc_exists),
+            patch(_DESIGN_PATCHES["parse_modules"], return_value=[]),
             patch(_DESIGN_PATCHES["list_design"], side_effect=list_design),
             patch(_DESIGN_PATCHES["file_design"]),
             patch(_DESIGN_PATCHES["claim"]),
@@ -411,9 +423,10 @@ class TestDesignWorkerPhase1:
         hld_issue = make_design_issue(10, "Design: HLD for v1")
 
         with (
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["classify_blocking"], return_value=([], [])),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], return_value=False),
             patch("brimstone.cli._list_open_issues_by_label", return_value=[hld_issue]),
             patch(_DESIGN_PATCHES["claim"]),
@@ -451,9 +464,10 @@ class TestDesignWorkerPhase1:
 
         # Simulate: HLD was skipped (no issue found) but doc still not on branch
         with (
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["classify_blocking"], return_value=([], [])),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], return_value=False),
             patch("brimstone.cli._list_open_issues_by_label", return_value=[]),
             patch(_DESIGN_PATCHES["file_design"]),
@@ -509,10 +523,12 @@ class TestDesignWorkerPhase2:
             return "HLD" in path  # HLD present, no LLD docs yet
 
         with (
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["classify_blocking"], return_value=([], [])),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], side_effect=doc_exists),
+            patch(_DESIGN_PATCHES["parse_modules"], return_value=[]),
             patch(
                 "brimstone.cli._list_open_issues_by_label",
                 return_value=lld_issues,
@@ -564,10 +580,12 @@ class TestDesignWorkerPhase2:
             return "HLD" in path or "parser" in path
 
         with (
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["classify_blocking"], return_value=([], [])),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], side_effect=doc_exists),
+            patch(_DESIGN_PATCHES["parse_modules"], return_value=[]),
             patch("brimstone.cli._list_open_issues_by_label", return_value=lld_issues),
             patch(_DESIGN_PATCHES["claim"]),
             patch(_DESIGN_PATCHES["create_wt"], return_value="/wt/21"),
@@ -603,10 +621,12 @@ class TestDesignWorkerPhase2:
         checkpoint = make_checkpoint()
 
         with (
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["classify_blocking"], return_value=([], [])),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], return_value=True),  # HLD present
+            patch(_DESIGN_PATCHES["parse_modules"], return_value=[]),
             patch("brimstone.cli._list_open_issues_by_label", return_value=[]),
             patch(_DESIGN_PATCHES["log_event"]),
             patch(_DESIGN_PATCHES["save_session"]),
@@ -635,10 +655,12 @@ class TestDesignWorkerPhase2:
             return "HLD" in path
 
         with (
+            patch(_DESIGN_PATCHES["list_research"], return_value=[]),
             patch(_DESIGN_PATCHES["classify_blocking"], return_value=([], [])),
             patch(_DESIGN_PATCHES["default_branch"], return_value="main"),
-            patch(_DESIGN_PATCHES["repo_root"], return_value="/repo"),
+            patch(_DESIGN_PATCHES["repo_root"], return_value=("/repo", None)),
             patch(_DESIGN_PATCHES["doc_exists"], side_effect=doc_exists),
+            patch(_DESIGN_PATCHES["parse_modules"], return_value=[]),
             patch("brimstone.cli._list_open_issues_by_label", return_value=[lld_issue]),
             patch(_DESIGN_PATCHES["claim"]),
             patch(_DESIGN_PATCHES["create_wt"], return_value="/wt/20"),

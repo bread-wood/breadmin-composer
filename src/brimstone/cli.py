@@ -5161,10 +5161,10 @@ def _run_design_worker(
                     f"`docs/design/{milestone}/HLD.md`\n\n"
                     "## Instructions\n"
                     f"Read all merged research docs in `docs/research/{milestone}/`. "
-                    "Write the HLD. "
-                    "For each module identified, file a `Design: LLD for <module>` "
-                    "issue with label `stage/design` and this milestone. "
-                    "Check for duplicates before filing."
+                    "Write the HLD following the skill instructions.\n\n"
+                    "**Do NOT file LLD issues.** The orchestrator parses `### Module:` "
+                    "headings from the merged HLD and creates LLD issues via bead-based "
+                    "dedup after this PR merges."
                 ),
                 store=store,
             )
