@@ -13,10 +13,10 @@ every anomaly in the source repo's bead store, and responds in one of three tier
   probe   — the cause is unclear; a ``stage/research`` issue is filed in ``repairs``
              so an agent can investigate before a fix is attempted.
 
-AnomalyBeads live in the source repo's bead store (``anomalies/<id>.json``).
-When brimstone watches multiple repos (``--watch``), each repo's anomaly beads stay
-in that repo's bead store and repair issues are filed in that repo's ``repairs``
-milestone — never cross-contaminated.
+AnomalyBeads live in the watched repo's bead store (``anomalies/<id>.json``).
+Repair issues (bug/probe tiers) are filed in *bugs_repo* (normally the brimstone
+repo itself — anomalies are brimstone bugs, not target-repo bugs). Inline fixes
+apply to the watched repo directly (e.g. correcting a GitHub label).
 
 Detector inventory
 ------------------
@@ -696,7 +696,6 @@ def process_anomalies(
     store: BeadStore,
     repo: str,
     dry_run: bool = False,
-    # bugs_repo kept for backward compat but ignored — issues go to repo's repairs milestone
     bugs_repo: str | None = None,
     config: Any = None,
     repo_root: str = "",
@@ -844,12 +843,24 @@ def process_anomalies(
                 anomaly.repair_tier == "bug"
                 and config is not None
                 and existing.gh_issue_number is not None
-                and existing.repair_branch is None  # not already dispatched
                 and existing.state == "open"
             ):
-                _run_repair_impl(
-                    existing, existing.gh_issue_number, _bugs_repo, store, config, repo_root
-                )
+                if existing.repair_pr_number is not None:
+                    # Agent already ran and created a PR — resume merge polling.
+                    _poll_and_merge_repair_pr(
+                        existing.repair_pr_number,
+                        existing.repair_branch or "",
+                        _bugs_repo,
+                        store,
+                        existing,
+                    )
+                elif existing.repair_branch is None:
+                    # No dispatch yet — run the full impl workflow.
+                    _run_repair_impl(
+                        existing, existing.gh_issue_number, _bugs_repo, store, config, repo_root
+                    )
+                # else: repair_branch set but no PR yet — agent may still be running
+                # (shouldn't happen since _run_repair_impl is blocking, but safe to skip)
 
     return new_urls
 
@@ -863,7 +874,7 @@ def run_monitor(
     store: BeadStore,
     repo: str,
     *,
-    bugs_repo: str | None = None,  # kept for backward compat; ignored
+    bugs_repo: str | None = None,
     once: bool = False,
     interval: int = MONITOR_INTERVAL_SECONDS,
     dry_run: bool = False,
@@ -895,7 +906,13 @@ def run_monitor(
 
         if anomalies:
             new_urls = process_anomalies(
-                anomalies, store, repo, dry_run=dry_run, config=config, repo_root=repo_root
+                anomalies,
+                store,
+                repo,
+                dry_run=dry_run,
+                bugs_repo=bugs_repo,
+                config=config,
+                repo_root=repo_root,
             )
             total = len(anomalies)
             new = len(new_urls)
@@ -1128,7 +1145,7 @@ def _run_repair_impl(
         repo_root = str(Path.cwd())
 
     default_branch = _get_default_branch(repo)
-    branch = f"repair/{abead.anomaly_id[:8]}-{issue_number}"
+    branch = f"repair-{abead.anomaly_id[:8]}-{issue_number}"
 
     print(f"[monitor] creating repair worktree: branch={branch!r}")
     worktree_path = _create_repair_worktree(branch, repo_root, default_branch)
@@ -1182,6 +1199,9 @@ def _run_repair_impl(
     if result.is_error:
         print(f"[monitor] repair agent for #{issue_number} failed ({result.subtype})")
         _remove_repair_worktree(worktree_path, repo_root)
+        # Clear so next scan can re-dispatch
+        abead.repair_branch = None
+        store.write_anomaly_bead(abead)
         return
 
     print(f"[monitor] repair agent for #{issue_number} finished — finding PR")
@@ -1204,6 +1224,9 @@ def _run_repair_impl(
     if pr_number is None:
         print(f"[monitor] WARN: no PR found for repair branch {branch!r}")
         _remove_repair_worktree(worktree_path, repo_root)
+        # Clear so next scan can re-dispatch
+        abead.repair_branch = None
+        store.write_anomaly_bead(abead)
         return
 
     print(f"[monitor] found repair PR #{pr_number} — monitoring CI")
@@ -1214,7 +1237,10 @@ def _run_repair_impl(
     _remove_repair_worktree(worktree_path, repo_root)
 
     if not merged:
-        print(f"[monitor] repair PR #{pr_number} not merged — will retry on next scan")
+        print(
+            f"[monitor] repair PR #{pr_number} not merged — "
+            "next scan will resume merge polling"
+        )
 
 
 # ---------------------------------------------------------------------------
