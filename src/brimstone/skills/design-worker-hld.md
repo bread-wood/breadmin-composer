@@ -92,8 +92,10 @@ git push -u origin <branch>
 For each module identified in the HLD, check for a duplicate then file a `stage/design` issue:
 
 ```bash
-# Fetch existing issue titles to check for dups
-EXISTING=$(gh issue list --repo <owner>/<repo> --state all --limit 500 --json title --jq '.[].title')
+# Fetch existing issue titles scoped to this milestone to check for dups
+# IMPORTANT: scope to --milestone so closed issues from prior milestones
+# (e.g. "Design: LLD for lexer" from v0.1.0) don't suppress creation here.
+EXISTING=$(gh issue list --repo <owner>/<repo> --state all --milestone "<milestone>" --limit 500 --json title --jq '.[].title')
 
 for MODULE in <module1> <module2> ...; do
   TITLE="Design: LLD for $MODULE"
