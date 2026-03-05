@@ -36,18 +36,25 @@ def _lld_issue(n: int, module: str) -> dict:
 
 
 class TestDesignWorkerGates:
-    def test_exits_if_research_still_open(self, git_repo: Path, tmp_path: Path) -> None:
-        """Gate 1: research must be fully closed before design can begin."""
+    def test_waits_when_research_still_open(self, git_repo: Path, tmp_path: Path, capsys) -> None:
+        """Gate 1: design worker waits for blocking research to clear, then proceeds."""
         os.chdir(git_repo)
         config = make_config(tmp_path)
         checkpoint = make_checkpoint(stage="design")
 
         with (
             patch("brimstone.cli._get_default_branch_for_repo", return_value="mainline"),
+            # First call: blocking; second call: cleared → gate exits
             patch(
                 "brimstone.cli._list_all_open_issues_by_label",
-                return_value=[make_issue(1, "Blocking research")],
+                side_effect=[[make_issue(1, "Blocking research")], []],
             ),
+            patch("brimstone.cli.time.sleep"),
+            # HLD already merged, skip Phase 1 and pass Gate 2
+            patch("brimstone.cli._doc_exists_on_default_branch", return_value=True),
+            # No modules in HLD, no LLD issues → SystemExit from Phase 2
+            patch("brimstone.cli._parse_modules_from_hld", return_value=[]),
+            patch("brimstone.cli._list_open_issues_by_label", return_value=[]),
         ):
             with pytest.raises(SystemExit):
                 _run_design_worker(
@@ -56,6 +63,9 @@ class TestDesignWorkerGates:
                     config=config,
                     checkpoint=checkpoint,
                 )
+
+        captured = capsys.readouterr()
+        assert "waiting" in captured.err.lower()
 
     def test_exits_if_hld_agent_errors(self, git_repo: Path, tmp_path: Path) -> None:
         """If the HLD agent errors, the design worker must exit non-zero."""

@@ -804,6 +804,7 @@ def process_anomalies(
                     )
                     anomaly.repair_tier = "bug"
                     existing.repair_tier = "bug"
+                    store.write_anomaly_bead(existing)
                     url = _file_repair_issue(anomaly, _bugs_repo)
                     if url:
                         existing.gh_issue_url = url
@@ -1266,3 +1267,242 @@ def _gh(
         cmd += ["--repo", repo]
     cmd += args
     return subprocess.run(cmd, capture_output=True, text=True, check=check)
+
+
+# ---------------------------------------------------------------------------
+# Bead repair
+# ---------------------------------------------------------------------------
+
+
+def _gh_pr_state(pr_number: int, repo: str) -> dict | None:
+    """Fetch PR state from GitHub; return dict or None on failure."""
+    result = _gh(
+        [
+            "pr",
+            "view",
+            str(pr_number),
+            "--json",
+            "state,mergeable,statusCheckRollup",
+        ],
+        repo=repo,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def _map_gh_to_prbead_state(gh: dict) -> str:
+    """Map GitHub PR JSON to a PRBead state string.
+
+    mergeable=MERGEABLE + all checks SUCCESS  →  "merge_ready"
+    mergeable=MERGEABLE + any check PENDING   →  "ci_running"
+    mergeable=MERGEABLE + any check FAILURE   →  "ci_failing"
+    mergeable=CONFLICTING                     →  "conflict"
+    """
+    mergeable = gh.get("mergeable", "")
+    if mergeable == "CONFLICTING":
+        return "conflict"
+    rollup = gh.get("statusCheckRollup") or []
+    conclusions = [c.get("conclusion", "") for c in rollup]
+    failing = {"FAILURE", "TIMED_OUT"}
+    if any(c in failing for c in conclusions):
+        return "ci_failing"
+    if any(c not in {"SUCCESS"} and c not in failing for c in conclusions):
+        return "ci_running"
+    # All SUCCESS (or empty rollup on MERGEABLE)
+    return "merge_ready"
+
+
+def repair_repo(store: BeadStore, repo: str, *, dry_run: bool = False) -> list[str]:
+    """Reconcile stale bead state against live GitHub state.
+
+    Runs five targeted passes and returns a list of human-readable fix strings.
+    When *dry_run* is True, no writes are performed and messages are prefixed
+    with "(dry-run)".
+
+    Pass 1 — orphaned_merge anomalies whose WorkBead has no pr_id: find the
+              open PR on GitHub, link it, then enqueue.
+    Pass 2 — orphaned_merge anomalies whose WorkBead already has a pr_id:
+              attempt inline repair directly.
+    Pass 3 — state_regression anomalies on terminal beads: mark wont_fix.
+    Pass 4 — all PRBeads in conflict/ci_failing: refresh from GitHub.
+    Pass 5 — label_drift anomalies: apply existing inline repair.
+    """
+    from brimstone.beads import PRBead as _PRBead
+
+    fixes: list[str] = []
+    tag = "(dry-run) " if dry_run else ""
+
+    # Detect current anomalies (needed for Passes 1, 2, 3, 5)
+    anomalies = run_all_detectors(store, repo)
+
+    orphaned = [a for a in anomalies if a.kind == "orphaned_merge"]
+    regressions = [a for a in anomalies if a.kind == "state_regression"]
+    drifts = [a for a in anomalies if a.kind == "label_drift"]
+
+    # ------------------------------------------------------------------
+    # Pass 1 — orphaned_merge with no pr_id
+    # ------------------------------------------------------------------
+    for anomaly in orphaned:
+        issue_number = anomaly.details.get("issue_number")
+        branch = anomaly.details.get("branch")
+        if issue_number is None:
+            continue
+        bead = store.read_work_bead(issue_number)
+        if bead is None or bead.pr_id is not None:
+            continue  # handled by Pass 2
+
+        if not branch:
+            fixes.append(f"{tag}orphaned_merge #{issue_number}: no branch in bead — skipped")
+            continue
+
+        # Look for an open PR with this head branch
+        result = _gh(
+            [
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "open",
+                "--json",
+                "number,mergeable,statusCheckRollup",
+            ],
+            repo=repo,
+            check=False,
+        )
+        pr_data: list[dict] = []
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                pr_data = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                pass
+
+        if not pr_data:
+            fixes.append(
+                f"{tag}orphaned_merge #{issue_number}: "
+                f"no open PR found for branch {branch!r} — skipped"
+            )
+            continue
+
+        pr = pr_data[0]
+        pr_number = pr["number"]
+        new_prbead_state = _map_gh_to_prbead_state(pr)
+
+        if not dry_run:
+            bead.pr_id = f"pr-{pr_number}"
+            store.write_work_bead(bead)
+
+            existing_pr = store.read_pr_bead(pr_number)
+            if existing_pr is None:
+                new_pr = _PRBead(
+                    v=BEAD_SCHEMA_VERSION,
+                    pr_number=pr_number,
+                    issue_number=issue_number,
+                    branch=branch,
+                    state=new_prbead_state,
+                )
+                store.write_pr_bead(new_pr)
+            else:
+                existing_pr.state = new_prbead_state
+                store.write_pr_bead(existing_pr)
+
+            _inline_repair_orphaned_merge(anomaly, store)
+
+        fixes.append(
+            f"{tag}orphaned_merge #{issue_number}: "
+            f"linked pr-{pr_number} ({new_prbead_state}) and enqueued"
+        )
+
+    # ------------------------------------------------------------------
+    # Pass 2 — orphaned_merge with pr_id already set
+    # ------------------------------------------------------------------
+    for anomaly in orphaned:
+        issue_number = anomaly.details.get("issue_number")
+        if issue_number is None:
+            continue
+        bead = store.read_work_bead(issue_number)
+        if bead is None or bead.pr_id is None:
+            continue  # handled by Pass 1
+
+        if not dry_run:
+            ok = _inline_repair_orphaned_merge(anomaly, store)
+            result_str = "enqueued" if ok else "enqueue failed"
+        else:
+            result_str = "would enqueue"
+        fixes.append(f"{tag}orphaned_merge #{issue_number}: pr_id={bead.pr_id} — {result_str}")
+
+    # ------------------------------------------------------------------
+    # Pass 3 — state_regression on terminal beads → wont_fix
+    # ------------------------------------------------------------------
+    for anomaly in regressions:
+        issue_number = anomaly.details.get("issue_number")
+        if issue_number is None:
+            continue
+        bead = store.read_work_bead(issue_number)
+        bead_state = bead.state if bead else None
+        aid = _anomaly_id(anomaly)
+        if bead_state in ("closed", "abandoned"):
+            if not dry_run:
+                existing = store.read_anomaly_bead(aid)
+                if existing is None or existing.state not in ("wont_fix", "repaired"):
+                    abead = AnomalyBead(
+                        v=BEAD_SCHEMA_VERSION,
+                        anomaly_id=aid,
+                        source_repo=repo,
+                        kind=anomaly.kind,
+                        severity=anomaly.severity,
+                        description=anomaly.description,
+                        details=anomaly.details,
+                        state="wont_fix",
+                        detected_at=datetime.now(UTC).isoformat(),
+                    )
+                    store.write_anomaly_bead(abead)
+            fixes.append(
+                f"{tag}state_regression #{issue_number}: marked wont_fix (bead is {bead_state!r})"
+            )
+        else:
+            fixes.append(
+                f"{tag}state_regression #{issue_number}: "
+                f"bead is {bead_state!r} — needs manual investigation"
+            )
+
+    # ------------------------------------------------------------------
+    # Pass 4 — stale PRBead refresh (conflict / ci_failing)
+    # ------------------------------------------------------------------
+    stale_states = {"conflict", "ci_failing"}
+    for prbead in store.list_pr_beads():
+        if prbead.state not in stale_states:
+            continue
+        gh = _gh_pr_state(prbead.pr_number, repo)
+        if gh is None:
+            continue
+        if gh.get("state", "").upper() in ("CLOSED", "MERGED"):
+            continue
+        new_state = _map_gh_to_prbead_state(gh)
+        if new_state == prbead.state:
+            continue
+        old_state = prbead.state
+        if not dry_run:
+            prbead.state = new_state
+            store.write_pr_bead(prbead)
+        fixes.append(f"{tag}PRBead pr-{prbead.pr_number}: {old_state} → {new_state}")
+
+    # ------------------------------------------------------------------
+    # Pass 5 — label_drift
+    # ------------------------------------------------------------------
+    for anomaly in drifts:
+        issue_number = anomaly.details.get("issue_number")
+        if not dry_run:
+            ok = _inline_repair_label_drift(anomaly, repo)
+            result_str = "fixed" if ok else "fix failed"
+        else:
+            has_label = anomaly.details.get("has_label", False)
+            result_str = f"would {'remove' if has_label else 'add'} label"
+        fixes.append(f"{tag}label_drift #{issue_number}: {result_str}")
+
+    return fixes

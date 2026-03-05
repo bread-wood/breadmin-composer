@@ -10,6 +10,7 @@ Subcommands:
   brimstone health  — preflight health checks
   brimstone cost    — cost ledger summary
   brimstone monitor — watch bead/repo state for aberrations and file bugs
+  brimstone repair  — repair stale bead state by reconciling with GitHub
 """
 
 from __future__ import annotations
@@ -48,6 +49,13 @@ from brimstone.config import (
 )
 from brimstone.health import FatalHealthCheckError
 from brimstone.session import Checkpoint
+from brimstone.sync import (
+    _BRIMSTONE_BOT,
+    GitHubSync,
+    _extract_module,
+    _extract_priority,
+    _parse_dependencies,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -829,14 +837,9 @@ def _resume_stale_issues(
                     _remove_worktree(wt_path, repo_root)
             handled.add(stale_number)
         elif _pr_merged_for_issue(repo, stale_number):
-            if store is not None:
-                _stale_bead = store.read_work_bead(stale_number)
-                if _stale_bead is not None and _stale_bead.state not in ("closed", "abandoned"):
-                    _stale_bead.state = "closed"
-                    _stale_bead.closed_at = datetime.now(UTC).isoformat()
-                    store.write_work_bead(_stale_bead)
-                    store.flush(f"brimstone: #{stale_number} closed — merged PR found")
-            _gh(["issue", "close", str(stale_number)], repo=repo, check=False)
+            GitHubSync(repo, store, gh=lambda args: _gh(args, repo=repo, check=False)).close_issue(
+                stale_number, f"brimstone: #{stale_number} closed — merged PR found"
+            )
             click.echo(
                 f"{log_prefix} Closed #{stale_number} — merged PR found, issue was not auto-closed",
                 err=True,
@@ -1087,53 +1090,8 @@ def _file_design_issue_if_missing(
     dedup against beads, not GitHub issues). Falls back to a GitHub issue-list
     query only when no store is available.
     """
-    if store is not None:
-        existing_titles = {
-            b.title for b in store.list_work_beads(milestone=milestone, stage="design")
-        }
-        if title in existing_titles:
-            return
-    else:
-        result = _gh(
-            [
-                "issue",
-                "list",
-                "--state",
-                "all",
-                "--milestone",
-                milestone,
-                "--limit",
-                "500",
-                "--json",
-                "title",
-            ],
-            repo=repo,
-            check=False,
-        )
-        if result.returncode == 0:
-            try:
-                existing = {i["title"] for i in json.loads(result.stdout)}
-                if title in existing:
-                    return
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-    _gh(
-        [
-            "issue",
-            "create",
-            "--title",
-            title,
-            "--label",
-            DESIGN_LABEL,
-            "--milestone",
-            milestone,
-            "--body",
-            body,
-        ],
-        repo=repo,
-        check=False,
-    )
+    _sync = GitHubSync(repo, store, gh=lambda args: _gh(args, repo=repo, check=False))
+    _sync.create_issue_if_missing(title, milestone, DESIGN_LABEL, body, stage="design")
 
 
 def _doc_exists_on_default_branch(repo: str, path: str, default_branch: str) -> bool:
@@ -1191,24 +1149,6 @@ def _parse_modules_from_hld(repo: str, hld_path: str, default_branch: str) -> li
     except (json.JSONDecodeError, KeyError, Exception):
         return []
     return re.findall(r"^###\s+Module:\s+(.+)$", content, re.MULTILINE)
-
-
-def _parse_dependencies(body: str) -> list[int]:
-    """Parse ``Depends on: #N`` references from an issue body.
-
-    Matches patterns like ``Depends on: #42`` or ``Depends on: #42, #43``.
-
-    Args:
-        body: Raw issue body text.
-
-    Returns:
-        List of referenced issue numbers as integers.
-    """
-    deps: list[int] = []
-    for match in re.finditer(r"[Dd]epends\s+on\s*:?\s*((?:#\d+(?:\s*,\s*)?)+)", body):
-        for num_match in re.finditer(r"#(\d+)", match.group(1)):
-            deps.append(int(num_match.group(1)))
-    return deps
 
 
 def _filter_unblocked(
@@ -1430,46 +1370,8 @@ def _claim_issue(
         store:        Active BeadStore instance.  When set, writes a WorkBead before
                       the GitHub API call.
     """
-    if store is not None:
-        existing = store.read_work_bead(issue_number)
-        if existing is not None:
-            # Bead was seeded — update in place
-            existing.state = "claimed"
-            existing.branch = branch
-            existing.claimed_at = datetime.now(UTC).isoformat()
-            store.write_work_bead(existing)
-        elif issue is not None:
-            # No seed bead — create from issue dict (fallback for unseeded stages)
-            milestone_title = (issue.get("milestone") or {}).get("title", "")
-            body = issue.get("body") or ""
-            bead = WorkBead(
-                v=BEAD_SCHEMA_VERSION,
-                issue_number=issue_number,
-                title=issue.get("title", ""),
-                milestone=milestone_title,
-                stage=_extract_stage(issue),
-                module=_extract_module(issue),
-                priority=_extract_priority(issue),
-                state="claimed",
-                branch=branch,
-                retry_count=0,
-                blocked_by=_parse_dependencies(body),
-                claimed_at=datetime.now(UTC).isoformat(),
-            )
-            store.write_work_bead(bead)
-        store.flush(f"brimstone: claim #{issue_number}")
-    _gh(
-        [
-            "issue",
-            "edit",
-            str(issue_number),
-            "--add-assignee",
-            _BRIMSTONE_BOT,
-            "--add-label",
-            "in-progress",
-        ],
-        repo=repo,
-        check=False,
+    GitHubSync(repo, store, gh=lambda args: _gh(args, repo=repo, check=False)).claim_issue(
+        issue_number, branch, issue
     )
 
 
@@ -1485,27 +1387,9 @@ def _unclaim_issue(repo: str, issue_number: int, store: BeadStore | None = None)
         store:        Active BeadStore instance.  When set, updates the WorkBead
                       state to ``"open"`` before the GitHub API call.
     """
-    if store is not None:
-        bead = store.read_work_bead(issue_number)
-        if bead is not None and bead.state not in ("abandoned", "closed", "merge_ready"):
-            bead.state = "open"
-            store.write_work_bead(bead)
-    info = _gh(
-        ["issue", "view", str(issue_number), "--json", "assignees"],
-        repo=repo,
-        check=False,
+    GitHubSync(repo, store, gh=lambda args: _gh(args, repo=repo, check=False)).unclaim_issue(
+        issue_number
     )
-    try:
-        assignees = [a["login"] for a in json.loads(info.stdout).get("assignees", [])]
-    except (json.JSONDecodeError, KeyError):
-        assignees = [_BRIMSTONE_BOT]
-    if not assignees:
-        assignees = [_BRIMSTONE_BOT]
-
-    args = ["issue", "edit", str(issue_number), "--remove-label", "in-progress"]
-    for login in assignees:
-        args += ["--remove-assignee", login]
-    _gh(args, repo=repo, check=False)
 
 
 def _exhaust_issue(
@@ -1524,30 +1408,9 @@ def _exhaust_issue(
         store:        Active BeadStore instance.  When set, updates the WorkBead
                       state to ``"abandoned"`` and flushes before the GitHub API calls.
     """
-    if store is not None:
-        bead = store.read_work_bead(issue_number)
-        if bead is not None:
-            bead.state = "abandoned"
-            store.write_work_bead(bead)
-            store.flush(f"brimstone: #{issue_number} abandoned — {reason}")
-    _gh(
-        [
-            "issue",
-            "comment",
-            str(issue_number),
-            "--body",
-            (
-                f"brimstone: agent exhausted all {MAX_RETRIES} retries without success.\n"
-                f"Failure reason: `{reason}`\n\n"
-                "Manual investigation required. Reopen this issue to retry on the next run."
-            ),
-        ],
-        repo=repo,
-        check=False,
+    GitHubSync(repo, store, gh=lambda args: _gh(args, repo=repo, check=False)).exhaust_issue(
+        issue_number, reason, MAX_RETRIES
     )
-    _unclaim_issue(repo=repo, issue_number=issue_number, store=store)
-    _gh(["issue", "edit", str(issue_number), "--add-label", "bug"], repo=repo, check=False)
-    _gh(["issue", "close", str(issue_number)], repo=repo, check=False)
 
 
 def _delete_remote_branch(repo: str, branch: str) -> None:
@@ -1806,18 +1669,9 @@ def _prune_stale_dependencies(
             state = (state_result.stdout or "").strip().upper()
             if state != "CLOSED":
                 continue
-            # Remove from WorkBead first (bead leads GitHub)
-            _dep_bead = store.read_work_bead(issue_number)
-            if _dep_bead is not None and ref in _dep_bead.blocked_by:
-                _dep_bead.blocked_by.remove(ref)
-                store.write_work_bead(_dep_bead)
-            # Then remove the stale dependency from the issue body
             new_body = re.sub(rf"\nDepends on: #{ref}", "", body)
-            _gh(
-                ["issue", "edit", str(issue_number), "--body", new_body],
-                repo=repo,
-                check=False,
-            )
+            _sync = GitHubSync(repo, store, gh=lambda args: _gh(args, repo=repo, check=False))
+            _sync.prune_dependency(issue_number, ref, new_body)
             body = new_body  # update for subsequent iterations
             logger.log_conductor_event(
                 run_id=checkpoint.run_id,
@@ -2552,22 +2406,6 @@ def _find_next_milestone(repo: str, current_milestone: str) -> str | None:
         return None
 
 
-def _migrate_issue_to_milestone(repo: str, issue_number: int, next_milestone: str) -> bool:
-    """Move *issue_number* to *next_milestone*.  Returns True on success."""
-    result = _gh(
-        [
-            "issue",
-            "edit",
-            str(issue_number),
-            "--milestone",
-            next_milestone,
-        ],
-        repo=repo,
-        check=False,
-    )
-    return result.returncode == 0
-
-
 def _run_completion_gate(
     repo: str,
     milestone: str,
@@ -2611,13 +2449,9 @@ def _run_completion_gate(
                     if dry_run:
                         click.echo(f"[dry-run] Would migrate #{issue_num} to milestone '{next_ms}'")
                     else:
-                        # Update bead milestone before the GitHub API call
-                        if store is not None:
-                            _mig_bead = store.read_work_bead(issue_num)
-                            if _mig_bead is not None:
-                                _mig_bead.milestone = next_ms
-                                store.write_work_bead(_mig_bead)
-                        ok = _migrate_issue_to_milestone(repo, issue_num, next_ms)
+                        ok = GitHubSync(
+                            repo, store, gh=lambda args: _gh(args, repo=repo, check=False)
+                        ).migrate_issue(issue_num, next_ms)
                         if ok:
                             click.echo(f"Migrated #{issue_num} to milestone '{next_ms}'")
                         else:
@@ -2678,9 +2512,6 @@ def _run_completion_gate(
 # Impl worker helpers
 # ---------------------------------------------------------------------------
 
-# Module label prefix for extracting module name from issue labels
-_FEAT_PREFIX = "feat:"
-
 # CI poll constants
 _CI_POLL_INTERVAL: int = 30  # seconds between gh pr checks polls
 _CI_MAX_POLLS: int = 60  # maximum polls before timeout (30 min)
@@ -2705,47 +2536,6 @@ def _slugify(title: str, max_len: int = 40) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
     slug = slug.strip("-")
     return slug[:max_len]
-
-
-def _extract_module(issue: dict[str, Any]) -> str:
-    """Extract the module name from a feat:* label on an issue.
-
-    Scans the issue's ``labels`` list for a label whose name starts with
-    ``feat:``.  Returns the part after the prefix (e.g. ``"config"`` from
-    ``"feat:config"``).  Returns ``"none"`` when no matching label is found.
-
-    Args:
-        issue: Issue dict with a ``labels`` key (list of label dicts with ``name``).
-
-    Returns:
-        Module name string, or ``"none"`` if no feat:* label is present.
-    """
-    for label in issue.get("labels", []):
-        name = label.get("name", "")
-        if name.startswith(_FEAT_PREFIX):
-            return name[len(_FEAT_PREFIX) :]
-    return "none"
-
-
-def _extract_stage(issue: dict[str, Any]) -> str:
-    """Return the stage string from issue labels ('research', 'impl', 'design', or '')."""
-    labels = {lbl["name"] for lbl in issue.get("labels", [])}
-    if "stage/research" in labels:
-        return "research"
-    if "stage/impl" in labels:
-        return "impl"
-    if "stage/design" in labels:
-        return "design"
-    return ""
-
-
-def _extract_priority(issue: dict[str, Any]) -> str:
-    """Return the priority label from issue labels (defaults to 'P2')."""
-    labels = {lbl["name"] for lbl in issue.get("labels", [])}
-    for p in ("P0", "P1", "P2", "P3", "P4"):
-        if p in labels:
-            return p
-    return "P2"
 
 
 def _find_pr_for_branch(repo: str, branch: str) -> int | None:
@@ -4498,32 +4288,21 @@ def _ensure_impl_scaffold(
             repo=repo,
             check=False,
         )
-        create = _gh(
-            [
-                "issue",
-                "create",
-                "--title",
-                _SCAFFOLD_TITLE,
-                "--label",
-                f"infra,{IMPL_LABEL},P1",
-                "--milestone",
-                milestone,
-                "--body",
-                _SCAFFOLD_BODY,
-            ],
-            repo=repo,
-            check=False,
+        scaffold_number = GitHubSync(
+            repo, store, gh=lambda args: _gh(args, repo=repo, check=False)
+        ).create_issue_if_missing(
+            _SCAFFOLD_TITLE,
+            milestone,
+            f"infra,{IMPL_LABEL},P1",
+            _SCAFFOLD_BODY,
+            stage="impl",
+            dedup_titles=set(),
         )
-        if create.returncode != 0:
+        if scaffold_number is None:
             click.echo(
-                f"[impl-worker] Warning: could not create scaffold issue: {create.stderr}",
+                "[impl-worker] Warning: could not create scaffold issue",
                 err=True,
             )
-            return None
-        url = create.stdout.strip()
-        try:
-            scaffold_number = int(url.split("/")[-1])
-        except (ValueError, IndexError):
             return None
         click.echo(f"[impl-worker] Created scaffold issue #{scaffold_number}", err=True)
     else:
@@ -5405,14 +5184,10 @@ def _run_design_worker(
         lld_path = f"docs/design/{milestone}/lld/{module}.md"
         if _doc_exists_on_default_branch(repo, lld_path, default_branch):
             click.echo(f"LLD for {module!r} already merged — skipping")
-            if store is not None:
-                _lld_bead = store.read_work_bead(issue["number"])
-                if _lld_bead is not None and _lld_bead.state not in ("closed", "abandoned"):
-                    _lld_bead.state = "closed"
-                    _lld_bead.closed_at = datetime.now(UTC).isoformat()
-                    store.write_work_bead(_lld_bead)
-                    store.flush(f"brimstone: #{issue['number']} closed — LLD already merged")
-            _gh(["issue", "close", str(issue["number"])], repo=repo, check=False)
+            GitHubSync(repo, store, gh=lambda args: _gh(args, repo=repo, check=False)).close_issue(
+                issue["number"],
+                f"brimstone: #{issue['number']} closed — LLD already merged",
+            )
         else:
             pending.append((module, issue))
 
@@ -5736,8 +5511,6 @@ def _validate_spec_path(spec: str) -> Path:
     return local
 
 
-_BRIMSTONE_BOT = "yeast-bot"
-
 _CI_WORKFLOW_TEMPLATE = """\
 name: CI
 
@@ -6015,6 +5788,7 @@ _REQUIRED_LABELS: list[tuple[str, str, str]] = [
     ("pipeline", "006b75", "Pipeline stage transition tracking"),
     ("bug", "ee0701", "Defect filed by QA or reported post-release"),
     ("infra", "bfd4f2", "Infrastructure and tooling work"),
+    ("triage", "f9d0c4", "Pending triage decision"),
 ]
 
 
@@ -7030,6 +6804,15 @@ def run(
     if not dry_run and repo_ref:
         _ensure_labels(repo_ref)
 
+    # Self-healing: repair stale bead state before the pipeline loop runs.
+    if not dry_run and repo_ref:
+        _repair_store = make_bead_store(config, repo_ref)
+        _fixes = monitor.repair_repo(_repair_store, repo_ref)
+        if _fixes:
+            click.echo(f"[repair] {len(_fixes)} bead fix(es) applied:", err=True)
+            for _f in _fixes:
+                click.echo(f"[repair]   {_f}", err=True)
+
     # -----------------------------------------------------------------------
     # Monitor thread — start before the pipeline loop when --monitor is set
     # -----------------------------------------------------------------------
@@ -7543,3 +7326,24 @@ def monitor_cmd(
     monitor.run_monitor(
         store, repo_ref, bugs_repo=bugs_repo, once=once, interval=interval, dry_run=dry_run
     )
+
+
+@brimstone.command("repair")
+@click.argument("repo")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print what would be fixed without writing bead files.",
+)
+def repair_cmd(repo: str, dry_run: bool) -> None:
+    """Repair stale bead state for REPO (owner/repo) by reconciling with GitHub."""
+    config = load_config(github_repo=repo, target_repo=repo)
+    store = make_bead_store(config, repo)
+    fixes = monitor.repair_repo(store, repo, dry_run=dry_run)
+    if fixes:
+        click.echo(f"[repair] {len(fixes)} fix(es){'  (dry-run)' if dry_run else ''}:")
+        for f in fixes:
+            click.echo(f"  {f}")
+    else:
+        click.echo("[repair] nothing to fix")
