@@ -697,7 +697,7 @@ def process_anomalies(
     repo: str,
     dry_run: bool = False,
     # bugs_repo kept for backward compat but ignored — issues go to repo's repairs milestone
-    bugs_repo: str | None = None,  # noqa: ARG001
+    bugs_repo: str | None = None,
     config: Any = None,
     repo_root: str = "",
 ) -> list[str]:
@@ -706,15 +706,24 @@ def process_anomalies(
     For each anomaly:
     - Sets ``is_blocking`` and ``repair_tier`` on the Anomaly object.
     - Creates an AnomalyBead in the source repo's bead store (dedup by anomaly_id).
-    - ``inline``: applies the fix directly, no issue filed.
-    - ``bug``: files a ``stage/impl`` issue in repo's ``repairs`` milestone.
-    - ``probe``: files a ``stage/research`` issue in repo's ``repairs`` milestone.
+    - ``inline``: applies the fix to the watched repo directly, no issue filed.
+    - ``bug``: files a ``stage/impl`` issue in *bugs_repo*'s ``repairs`` milestone
+      and dispatches an impl agent to fix the brimstone source.
+    - ``probe``: files a ``stage/research`` issue in *bugs_repo*'s ``repairs`` milestone.
+
+    *bugs_repo* is the repo where anomaly issues are filed (normally the brimstone repo
+    itself — anomalies are brimstone bugs, not target-repo bugs). Defaults to *repo*
+    when omitted.
 
     Also runs a cleanup sweep: AnomalyBeads in ``open`` state whose anomaly no
     longer appears are transitioned to ``repaired``.
 
     Returns a list of URLs for repair issues filed this run.
     """
+    # Repair issues (bug + probe tiers) go to bugs_repo (the brimstone repo), not
+    # the target repo being watched. Inline fixes still apply to the watched repo.
+    _bugs_repo = bugs_repo or repo
+
     active_milestone = _get_active_milestone(store)
 
     for anomaly in anomalies:
@@ -796,7 +805,7 @@ def process_anomalies(
                     )
                     anomaly.repair_tier = "bug"
                     existing.repair_tier = "bug"
-                    url = _file_repair_issue(anomaly, repo)
+                    url = _file_repair_issue(anomaly, _bugs_repo)
                     if url:
                         existing.gh_issue_url = url
                         try:
@@ -810,7 +819,7 @@ def process_anomalies(
         # --- Bug / Probe tiers ---
         else:
             if existing.gh_issue_number is None:
-                url = _file_repair_issue(anomaly, repo)
+                url = _file_repair_issue(anomaly, _bugs_repo)
                 if url:
                     existing.gh_issue_url = url
                     try:
@@ -838,7 +847,9 @@ def process_anomalies(
                 and existing.repair_branch is None  # not already dispatched
                 and existing.state == "open"
             ):
-                _run_repair_impl(existing, existing.gh_issue_number, repo, store, config, repo_root)
+                _run_repair_impl(
+                    existing, existing.gh_issue_number, _bugs_repo, store, config, repo_root
+                )
 
     return new_urls
 
@@ -864,8 +875,8 @@ def run_monitor(
     Args:
         store:     BeadStore for the target repo.
         repo:      ``owner/repo`` string (for GitHub API calls).
-        bugs_repo: Deprecated; ignored. Repair issues are now filed in each
-                   repo's own ``repairs`` milestone, not a central bugs repo.
+        bugs_repo: Repo where anomaly issues are filed — normally the brimstone
+                   repo itself (anomalies are brimstone bugs). Defaults to *repo*.
         once:      If True, run one pass and return instead of looping.
         interval:  Seconds between detection passes.
         dry_run:   If True, print anomalies but do not write beads or file issues.
